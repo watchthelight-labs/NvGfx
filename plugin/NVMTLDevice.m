@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include "nvgfx_wstrace.h"
 #include <unistd.h>
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
@@ -1336,6 +1337,8 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
     d = nvmtl_gl_rewrite_descriptor(d, err); if (!d) return nil;
     if (nvmtl_vk_init()) return nvmtl_fail(err, @"pipeline: Vulkan is not up in this process");
     id<MTLFunction> vfn = d.vertexFunction, ffn = d.fragmentFunction;
+    nvgfx_wstrace("render pipeline '%s' vs %s fs %s fmt0 %lu blend %d", d.label.UTF8String ?: "", vfn.name.UTF8String ?: "-",
+                  ffn.name.UTF8String ?: "-", (unsigned long)d.colorAttachments[0].pixelFormat, (int)d.colorAttachments[0].blendingEnabled);
     if (!vfn) return nvmtl_fail(err, @"pipeline: descriptor is missing a vertex function");
     int noFrag = ffn == nil;
     if (noFrag) ffn = nvmtl_empty_fragment();
@@ -1672,6 +1675,10 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 
 - (id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor *)sd {
     if (nvmtl_vk_init()) return nil;
+    nvgfx_wstrace("sampler '%s' min %lu mag %lu mip %lu norm %d addr %lu/%lu aniso %lu lod %.2f..%.2f argbuf %d",
+                  sd.label.UTF8String ?: "", (unsigned long)sd.minFilter, (unsigned long)sd.magFilter, (unsigned long)sd.mipFilter,
+                  (int)sd.normalizedCoordinates, (unsigned long)sd.sAddressMode, (unsigned long)sd.tAddressMode,
+                  (unsigned long)sd.maxAnisotropy, sd.lodMinClamp, sd.lodMaxClamp, (int)sd.supportArgumentBuffers);
     NVMTLSamplerState *s = [NVMTLSamplerState new];
     s->_label = [sd.label copy];
     if (!sd.normalizedCoordinates) {
@@ -1710,6 +1717,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)fn error:(NSError **)err {
     if (err) *err = nil;
+    nvgfx_wstrace("compute pipeline %s", fn.name.UTF8String ?: "-");
     if (nvmtl_vk_init()) return nvmtl_fail(err, @"newComputePipelineState: Vulkan is not up in this process");
     if (fn && ![(id)fn isKindOfClass:[NVMTLFunction class]])
         return nvmtl_fail(err, [NSString stringWithFormat:
