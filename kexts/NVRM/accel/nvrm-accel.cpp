@@ -1243,6 +1243,15 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_crc_head, CTLFLAG_RW | CTLFLAG_LOCKED, &gCr
 static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS;
 SYSCTL_PROC(_debug, OID_AUTO, nvaccel_crc, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, nvaccel_crc_sysctl, "I",
             "b85k-crc: display CRC32 of what head nvaccel_crc_head is showing (0 = unavailable)");
+// NvGfx: why a dirty mark was refused (each refusal costs the plugin a full CPU copy-out of the surface)
+static unsigned gNVSVRefType, gNVSVRefFlag, gNVSVRefValid, gNVSVRefPend, gNVSVRefNoRes, gNVSVRefFlagLast, gNVSVOkFlagLast;
+SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_ref_type, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVRefType, 0, "dirty refused: resource type is not 0xc0");
+SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_ref_flag, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVRefFlag, 0, "dirty refused: resource flag 0x8000 set");
+SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_ref_valid, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVRefValid, 0, "dirty refused: no valid map or plane > 15");
+SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_ref_pend, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVRefPend, 0, "dirty refused: pending-mark table full");
+SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_ref_nores, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVRefNoRes, 0, "dirty refused: no cache, resource or vidmem");
+SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_ref_flag_last, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVRefFlagLast, 0, "resource flags of the last flag refusal");
+SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_ok_flag_last, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVOkFlagLast, 0, "resource flags of the last accepted mark");
 static bool gSysctlInstalled = false;
 static void nvaccelInstallSysctl(void)
 {
@@ -1290,6 +1299,10 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h4);      sysctl_register_oid(&sysctl__debug_nvaccel_igpu);
     sysctl_register_oid(&sysctl__debug_nvaccel_heads_published); sysctl_register_oid(&sysctl__debug_nvaccel_heads_registered);
     sysctl_register_oid(&sysctl__debug_nvaccel_heads_piped);
+    sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ref_type);  sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ref_flag);
+    sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ref_valid); sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ref_pend);
+    sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ref_nores); sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ref_flag_last);
+    sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ok_flag_last);
     gSysctlInstalled = true;
     ALOG("sysctl debug.nvaccelfb installed -- `sudo sysctl -w debug.nvaccelfb=1` registers the framebuffer");
 #endif
@@ -1438,15 +1451,19 @@ static unsigned gNVSVOk, gNVSVRefused;
 static inline void nvSVZero(void *p, unsigned long n) { volatile unsigned char *b = (volatile unsigned char *)p; while (n--) *b++ = 0; }
 
 static unsigned gNVSVDirty, gNVSVDirtyRefused, gNVSVPageoff, gNVSVPageoffFail;
+
 static unsigned nvAccelSurfDirty(void *cache, NVResource *res, unsigned plane)
 {
     volatile unsigned char *r = (volatile unsigned char *)res;
     unsigned char type = r[0x14];
     unsigned int fl = *(volatile unsigned int *)(r + 0xc);
     volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
-    if (type != 0xc0 || (fl & 0x8000) || !valid || plane > 15) return NVRM_SS_NO_CACHE;
+    if (type != 0xc0) { gNVSVRefType++; return NVRM_SS_NO_CACHE; }
+    if (fl & 0x8000) { gNVSVRefFlag++; gNVSVRefFlagLast = fl; return NVRM_SS_NO_CACHE; }
+    if (!valid || plane > 15) { gNVSVRefValid++; return NVRM_SS_NO_CACHE; }
     if (!gNVSVPendLock) gNVSVPendLock = IOSimpleLockAlloc();
-    if (!nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1, res)) return NVRM_SS_NO_CACHE;
+    if (!nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1, res)) { gNVSVRefPend++; return NVRM_SS_NO_CACHE; }
+    gNVSVOkFlagLast = fl;
     _ZN20IOSurfaceDeviceCache10setCurrentEv(cache);
     valid[6] |= (unsigned short)(1u << plane);
     valid[0] &= (unsigned short)~(1u << plane);
@@ -1488,7 +1505,7 @@ static IOReturn nvAccelSurfVram(struct NVRMSurfShareEsc *p, task_t task, unsigne
     NVResource *res = OSDynamicCast(NVResource, ctx);
     NVVidMemory *vm = res ? nvres_vidmem(res) : nullptr;
     if (cmd == NVRM_ESC_SURF_DIRTY) {
-        p->status = (cache && res && vm && vm->fRmHandle) ? nvAccelSurfDirty(cache, res, p->plane) : NVRM_SS_NO_CACHE;
+        p->status = (cache && res && vm && vm->fRmHandle) ? nvAccelSurfDirty(cache, res, p->plane) : (gNVSVRefNoRes++, NVRM_SS_NO_CACHE);
         if (p->status == 0) gNVSVDirty++; else gNVSVDirtyRefused++;
         if (gNVSVDirty + gNVSVDirtyRefused <= 6 || ((gNVSVDirty + gNVSVDirtyRefused) & 4095) == 0)
             ALOG("surfvram dirty: surface %u plane %u type 0x%x -> %#x (dirty %u, refused %u)", p->surfaceID, p->plane,
