@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <syslog.h>
+#include "nvgfx_wstrace.h"
 #include <stdatomic.h>
 
 void nvlog(const char *fmt, ...);
@@ -4815,6 +4816,14 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     NVMTLRenderCommandEncoder *e = [NVMTLRenderCommandEncoder new];
     _nEnc++;
     e->_cb = self; e->_target = (NVMTLTexture *)d.colorAttachments[0].texture;
+    if (nvgfx_wstrace_on()) {
+        id<MTLTexture> t0 = d.colorAttachments[0].texture;
+        static _Atomic unsigned small;
+        if (t0 && t0.width < 1280 && t0.height < 800 && atomic_fetch_add(&small, 1) < 600)
+            nvgfx_wstrace("render pass target %lux%lu fmt %lu level %lu load %lu label '%s'", (unsigned long)t0.width, (unsigned long)t0.height,
+                          (unsigned long)t0.pixelFormat, (unsigned long)d.colorAttachments[0].level, (unsigned long)d.colorAttachments[0].loadAction,
+                          t0.label.UTF8String ?: "");
+    }
     if (!_resources) _resources = [NVMTLResSet new];
     if (e->_target) [_resources addObject:e->_target];
     if (d.depthAttachment.texture) [_resources addObject:d.depthAttachment.texture];
