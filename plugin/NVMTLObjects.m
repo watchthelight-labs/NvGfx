@@ -7,6 +7,8 @@
 #import <QuartzCore/QuartzCore.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <syslog.h>
+#include <stdatomic.h>
 
 void nvlog(const char *fmt, ...);
 
@@ -1222,6 +1224,21 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-in #%u: %ux%u surface %p seed %u uploaded", n, r->_i.w, r->_i.h, (void *)r->_surf, seed);
     }
 }
+// NvGfx: NVMTL_NVGFX_SURFOUT_TRACE=1 logs every CPU copy-out (GPU image -> staging -> memcpy into the IOSurface) to syslog,
+// so the surfaces that cost WindowServer frame time can be identified in a release build. Off by default.
+static void nvgfx_surfout_trace(IOSurfaceRef s, NSUInteger plane, uint32_t w, uint32_t h, uint32_t bpp, int vram, uint64_t ns)
+{
+    static int on = -1; if (on < 0) { const char *e = getenv("NVMTL_NVGFX_SURFOUT_TRACE"); on = e && e[0] == '1'; }
+    if (!on) return;
+    static _Atomic unsigned long n; static _Atomic uint64_t sum;
+    const unsigned long k = atomic_fetch_add(&n, 1) + 1; const uint64_t tot = atomic_fetch_add(&sum, ns) + ns;
+    if (k > 400 && k % 500) return;
+    const OSType f = IOSurfaceGetPixelFormat(s);
+    syslog(LOG_ERR, "NvGfx surfout #%lu: surface %u %ux%u bpp %u plane %lu/%zu fmt %c%c%c%c row %zu %s, %.2f ms (avg %.2f ms)", k,
+           (unsigned)IOSurfaceGetID(s), w, h, bpp, (unsigned long)plane, IOSurfaceGetPlaneCount(s),
+           (char)(f >> 24), (char)(f >> 16), (char)(f >> 8), (char)f, IOSurfaceGetBytesPerRowOfPlane(s, plane),
+           vram ? "VRAM, page-off refused" : "private image", ns / 1e6, tot / 1e6 / k);
+}
 - (BOOL)nvmtlSurfaceOut {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
@@ -1235,6 +1252,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
         return YES;
     }
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    const int dirtyRefused = r->_vramOn;   // reached only when the VRAM page-off was refused or the surface is private
     uint32_t lockopt = nvmtl_noseed() ? kIOSurfaceLockReadOnly : 0;
     if (IOSurfaceLock(r->_surf, lockopt, NULL) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
@@ -1246,6 +1264,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     r->_surfSeed = seed; r->_surfSynced = YES;
     r->_surfGen = r->_vramOn ? r->_surfGen : nvmtl_vram_gen(r->_surf, r->_plane);
     if (r->_vramOn && !lockopt) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
+    nvgfx_surfout_trace(r->_surf, r->_plane, r->_i.w, r->_i.h, r->_i.bpp, dirtyRefused, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0);
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-out #%u: %ux%u surface %p seed %u, %.2f ms", n, r->_i.w, r->_i.h,
         (void *)r->_surf, seed, (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6);
     return YES;

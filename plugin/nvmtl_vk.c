@@ -1,3 +1,4 @@
+#include <syslog.h>
 /*
  * NullMoth NVIDIA driver for macOS
  * Copyright (c) 2026 NullMoth Systems.
@@ -1864,7 +1865,9 @@ int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
     }
     if (!on || !g_dev) return -1;
     uint32_t st = pnvk_surface_dirty(g_dev, surfaceID, plane);
-    if (st) { static unsigned n; if (n++ < 8 || n % 2000 == 0) nvlog("surface %u dirty refused (%#x) - copy-out (%u so far)", surfaceID, st, n); }
+    if (st) { static unsigned n; if (n++ < 8 || n % 2000 == 0) nvlog("surface %u dirty refused (%#x) - copy-out (%u so far)", surfaceID, st, n);
+              static int tr = -1; if (tr < 0) { const char *t = getenv("NVMTL_NVGFX_SURFOUT_TRACE"); tr = t && t[0] == '1'; }
+              if (tr && (n <= 400 || n % 500 == 0)) syslog(LOG_ERR, "NvGfx surfout: surface %u plane %u page-off refused %#x (#%u)", surfaceID, plane, st, n); }
     return st ? -1 : 0;
 }
 // WindowServer completion mark (NVAccel nvSurfGpuEscape), on NVK's surface escape: 0 = the kernel took it
