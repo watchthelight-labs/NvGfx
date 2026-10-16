@@ -1245,6 +1245,11 @@ SYSCTL_PROC(_debug, OID_AUTO, nvaccel_crc, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LO
             "b85k-crc: display CRC32 of what head nvaccel_crc_head is showing (0 = unavailable)");
 // NvGfx: why a dirty mark was refused (each refusal costs the plugin a full CPU copy-out of the surface)
 static unsigned gNVSVRefType, gNVSVRefFlag, gNVSVRefValid, gNVSVRefPend, gNVSVRefNoRes, gNVSVRefFlagLast, gNVSVOkFlagLast;
+static int gDirtyUnpark = 1;
+static unsigned gNVSVUnparkOk, gNVSVUnparkMiss;
+SYSCTL_INT(_debug, OID_AUTO, nvgfx_dirty_unpark, CTLFLAG_RW | CTLFLAG_LOCKED, &gDirtyUnpark, 0, "1 = a dirty mark re-wires parked VRAM instead of forcing a CPU copy-out (0 = old behaviour)");
+SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_unpark_ok, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVUnparkOk, 0, "dirty marks that got their parked VRAM back");
+SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_unpark_miss, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVUnparkMiss, 0, "re-wire gave other or no VRAM: refused, copy-out");
 static unsigned gNVSVRefNoCache, gNVSVRefNoResObj, gNVSVRefNoVm, gNVSVRefNoRm, gNVSVRefScanout, gNVSVRefParked;
 SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_nores_cache, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVRefNoCache, 0, "nores: no device cache");
 SYSCTL_UINT(_debug, OID_AUTO, nvgfx_dirty_nores_res, CTLFLAG_RD | CTLFLAG_LOCKED, &gNVSVRefNoResObj, 0, "nores: cache has no NVResource");
@@ -1310,6 +1315,8 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ref_valid); sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ref_pend);
     sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ref_nores); sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ref_flag_last);
     sysctl_register_oid(&sysctl__debug_nvgfx_dirty_ok_flag_last);
+    sysctl_register_oid(&sysctl__debug_nvgfx_dirty_unpark); sysctl_register_oid(&sysctl__debug_nvgfx_dirty_unpark_ok);
+    sysctl_register_oid(&sysctl__debug_nvgfx_dirty_unpark_miss);
     sysctl_register_oid(&sysctl__debug_nvgfx_dirty_nores_cache); sysctl_register_oid(&sysctl__debug_nvgfx_dirty_nores_res);
     sysctl_register_oid(&sysctl__debug_nvgfx_dirty_nores_vm);    sysctl_register_oid(&sysctl__debug_nvgfx_dirty_nores_rm);
     sysctl_register_oid(&sysctl__debug_nvgfx_dirty_nores_scanout); sysctl_register_oid(&sysctl__debug_nvgfx_dirty_nores_parked);
@@ -1515,6 +1522,20 @@ static IOReturn nvAccelSurfVram(struct NVRMSurfShareEsc *p, task_t task, unsigne
     NVResource *res = OSDynamicCast(NVResource, ctx);
     NVVidMemory *vm = res ? nvres_vidmem(res) : nullptr;
     if (cmd == NVRM_ESC_SURF_DIRTY) {
+        // NvGfx (N-71): a CPU lock (the plugin's own copy-out included) makes the family page the surface off, which
+        // parks its VRAM. The plugin keeps drawing into that parked VRAM, so without this every later dirty mark was
+        // refused and every frame was copied out through the CPU, which locked the surface again: a loop the surface
+        // never left. Re-wire through the family (as the SURF_VRAM path does) and take the mark only when the family
+        // handed back the very VRAM the plugin draws into.
+        if (gDirtyUnpark && vm && !vm->fRmHandle && !vm->fScanout && vm->fParkHandle) {
+            void *parked = vm->fParkHandle;
+            _ZN16IOAccelVidMemory4wireEv(vm);
+            if (vm->fRmHandle == parked) gNVSVUnparkOk++;
+            else gNVSVUnparkMiss++;
+            if (vm->fRmHandle && vm->fRmHandle != parked) { p->status = NVRM_SS_NO_CACHE; gNVSVDirtyRefused++;
+                if (cache) ((OSObject *)cache)->release();
+                nvFamUnlock(a); ((OSObject *)surf)->release(); return kIOReturnSuccess; }
+        }
         p->status = (cache && res && vm && vm->fRmHandle) ? nvAccelSurfDirty(cache, res, p->plane) : (gNVSVRefNoRes++, NVRM_SS_NO_CACHE);
         if (p->status == NVRM_SS_NO_CACHE && !(cache && res && vm && vm->fRmHandle)) {
             if (!cache) gNVSVRefNoCache++; else if (!res) gNVSVRefNoResObj++; else if (!vm) gNVSVRefNoVm++;
