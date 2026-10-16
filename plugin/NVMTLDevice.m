@@ -1444,7 +1444,14 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
             mf, rl ? rl.intValue : -1 };
         prc = nvmtl_vk_pipeline_create_rt(vf->_spirv.bytes, vf->_spirv.length, fsb, fsl, &rt, vin.nattr ? &vin : NULL, rsc, &td, &ps->_p);
     } else
+        { extern __thread int nvgfx_fcopy_fell_back; nvgfx_fcopy_fell_back = 0;
         prc = nvmtl_vk_pipeline_create_rt(vf->_spirv.bytes, vf->_spirv.length, fsb, fsl, &rt, vin.nattr ? &vin : NULL, rsc, NULL, &ps->_p);
+        if (nvgfx_fcopy_fell_back) {   // N-81: say which specialization failed, so it can be rebuilt offline
+            static _Atomic unsigned nfb; NSDictionary *fc = ((NVMTLFunction *)ff)->_fc;
+            NSData *j = fc ? [NSJSONSerialization dataWithJSONObject:fc options:NSJSONWritingSortedKeys error:NULL] : nil;
+            if (atomic_fetch_add(&nfb, 1) < 6) syslog(LOG_ERR, "NvGfx N-81 fetch-copy fallback: %s / %s fc %s", vf->_fname.UTF8String,
+                                                   ((NVMTLFunction *)ff)->_fname.UTF8String, j ? [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding].UTF8String : "-");
+        } }
     if (prc) {
         nvlog("pipeline FAILED: %s / %s — see the vk: line above for the VkResult", vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?");
         return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: vkCreateGraphicsPipelines FAILED (%@ / %@)", vf->_fname, ff->_fname]); }

@@ -3093,8 +3093,11 @@ static int nvmtl_fetch_layouts_locked(void)
  * NVMTL_NVGFX_FETCH_COPY=1 in the environment, or boot-arg nvgfxfetchcopy=1 in WindowServer (a boot-arg, so booting
  * without it is the rollback).
  */
+static __thread int g_fetch_copy_off_tls;   // set while a failed fetch-copy pipeline is rebuilt without it
+__thread int nvgfx_fcopy_fell_back;           // the last pipeline this thread made fell back from fetch copy (N-81)
 static int nvmtl_fetch_copy_on(void)
 {
+    if (g_fetch_copy_off_tls) return 0;
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("NVMTL_NVGFX_FETCH_COPY");
@@ -4069,6 +4072,16 @@ static int nvmtl_vk_pipeline_create_impl(const void *vs, size_t vn, const void *
 {
     nvk_pipeline pending = {0};
     int result = nvmtl_vk_pipeline_create_impl_lifetime_body(vs, vn, fs, fn, vkfmt, depthfmt, blend_, vin_, samples, td, rt, &pending);
+    if (result && pending.fetch_copy) {
+        // NvGfx (N-81): a pipeline whose colour reads were rewritten for copies failed to build. Build it again as it was
+        // (its reads stay unbound, as before N-81) rather than fail: CoreAnimation aborts WindowServer on a failed pipeline,
+        // and a fetch-copy failure blanked the desktop in a restart loop (N-81, first boot).
+        static _Atomic unsigned said; if (atomic_fetch_add(&said, 1) < 8) nvlog("vk: N-81 fetch-copy pipeline FAILED - rebuilt without it");
+        nvmtl_failed_pipeline(&pending); memset(&pending, 0, sizeof pending);
+        g_fetch_copy_off_tls = 1; nvgfx_fcopy_fell_back = 1;
+        result = nvmtl_vk_pipeline_create_impl_lifetime_body(vs, vn, fs, fn, vkfmt, depthfmt, blend_, vin_, samples, td, rt, &pending);
+        g_fetch_copy_off_tls = 0;
+    }
     if (result) { nvmtl_failed_pipeline(&pending); memset(out_, 0, sizeof pending); }
     else *(nvk_pipeline *)out_ = pending;
     return result;
@@ -4153,6 +4166,7 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
                   static int said; if (said++ < 8) nvlog("vk: N-81 fragment shader reads colour 0x%x through copies", out->fetch_copy); }
         else { static int said; if (said++ < 8) nvlog("vk: N-81 could not rewrite a colour-reading fragment shader - left as it was"); out->fetch_copy = 0; }
     }
+    if (out->fetch_copy && getenv("NVMTL_NVGFX_FCOPY_FORCE_FAIL")) { free(fcopy); return -1; }   // test of the N-81 fallback only
     VkShaderModuleCreateInfo fsm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, fbytes, fcopy };
     VkShaderModule vmod = VK_NULL_HANDLE, fmod = VK_NULL_HANDLE, tvm = VK_NULL_HANDLE, tcm = VK_NULL_HANDLE;
     NVMTL_PIPELINE_STAGE(pvkCreateShaderModule(g_dev, &vsm, NULL, &vmod), "vkCreateShaderModule(vertex)");
