@@ -116,6 +116,7 @@ stage_glue() {
   [ $rc = 0 ] || { grep -h "error:" "$G"/*.err | head -20; echo "STOP: glue C++ failed"; exit 5; }
   # RM-internal C glue: compiled with RM's own command line (rmcc.py, osapi.c's line) or NVKMS's (linecc.py, nvkms-kapi.c's).
   OGKM=$OGKM python3 "$K/rmcc.py" "$K/nvrm_pageoff.c" "$G/nvrm_pageoff.o" 2> "$G/nvrm_pageoff.err" || { cat "$G/nvrm_pageoff.err"; exit 5; }
+  OGKM=$OGKM python3 "$K/rmcc.py" "$K/nvrm_physctl.c" "$G/nvrm_physctl.o" 2> "$G/nvrm_physctl.err" || { cat "$G/nvrm_physctl.err"; exit 5; }
   python3 "$H/linecc.py" "$KMS" kapi/src/nvkms-kapi.c "$K/nvrm_kapi_fields.c" "$G/nvrm_kapi_fields.o" 2> "$G/nvrm_kapi_fields.err" || { cat "$G/nvrm_kapi_fields.err"; exit 5; }
   say "glue: $(ls "$G"/*.o | wc -l | tr -d ' ') objects, warnings $(cat "$G"/*.err | grep -c 'warning:' || true)"
 }
@@ -128,7 +129,7 @@ stage_link() {
   # archive members in load order (RM first: access_cntr_buffer.o follows pageoff in the shipped text).
   "$CXX" -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext \
     "$G/nv_xnu_stubs.o" "$G/nvkms_shaders.o" "$G/nvrm_fbinfo.o" "$G/nvrm_gpuva.o" "$G/nvrm_surfshare.o" "$G/NVRM.o" \
-    "$G/os-nvkms-xnu.o" "$G/os-xnu.o" "$G/os-xnu2.o" "$G/nvrm_kapi_fields.o" "$G/nvrm_pageoff.o" \
+    "$G/os-nvkms-xnu.o" "$G/os-xnu.o" "$G/os-xnu2.o" "$G/nvrm_kapi_fields.o" "$G/nvrm_pageoff.o" "$G/nvrm_physctl.o" \
     "$OGKM/src/nvidia/_out/Darwin_x86_64/libnvkernel.a" "$O/completion/libnvkms.a" \
     -lkmodc++ -lkmod -lcc_kext -o "$X/Contents/MacOS/NVRM" > "$O/logs/link.log" 2>&1 \
     || { grep -v "built for newer macOS" "$O/logs/link.log" | head -30; echo "STOP: link failed"; exit 6; }
