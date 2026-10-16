@@ -2633,6 +2633,21 @@ static BOOL nvgfx_ws_interesting(NSString *n)
 }
 - (BOOL)nvmtlBindSamplerPipeline {
     if (!_ps) return NO;
+    if (nvgfx_wstrace_on() && !nvgfx_ws_interesting(_ps->_fname)) {
+        // N-79: any other draw that samples a small blurred strip (the blur chain's 322x8 output) is the backdrop composite.
+        NSDictionary *ft = objc_getAssociatedObject(self, NVGFX_FTEX_KEY);
+        BOOL strip = NO;
+        for (NSString *v in ft.allValues) { unsigned w = 0, h = 0; if (sscanf(v.UTF8String, "%ux%u", &w, &h) == 2 && w >= 32 && w < 700 && h <= 16) strip = YES; }
+        static _Atomic unsigned ncomp;
+        if (strip && atomic_fetch_add(&ncomp, 1) < 40) {
+            NSData *fj = _fragmentSamplers.count ? [NSJSONSerialization dataWithJSONObject:_fragmentSamplers options:NSJSONWritingSortedKeys error:NULL] : nil;
+            nvgfx_wstrace("COMPOSITE fs %s vs %s target %ux%u | ftex %s | pixel samplers %s | vdesc %s", _ps->_fname.UTF8String, _ps->_vname.UTF8String,
+                          _target ? [_target nvi]->w : 0u, _target ? [_target nvi]->h : 0u,
+                          [[[ft description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String],
+                          fj ? [[NSString alloc] initWithData:fj encoding:NSUTF8StringEncoding].UTF8String : "-",
+                          _ps->_vdesc.UTF8String ?: "-");
+        }
+    }
     if (nvgfx_wstrace_on() && nvgfx_ws_interesting(_ps->_fname)) {
         static NSMutableDictionary *seen; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
         pthread_mutex_lock(&mu); if (!seen) seen = [NSMutableDictionary new];
