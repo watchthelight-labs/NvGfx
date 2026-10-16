@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+tools/nvgfx-smi/nvgfx-smi
+tools/nvgfx-burn/nvgfx-burn
