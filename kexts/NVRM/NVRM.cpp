@@ -29,6 +29,9 @@ extern "C" {
 #include "nvrm_gpuva_abi.h"
 #define NVRM_SS_KERNEL_ABI 1
 #include "nvrm_surfshare_abi.h"
+#include "nvrm_physctl_abi.h"
+extern "C" NV_STATUS rm_nvgfx_phys_control(nv_state_t *nv, NvU32 mode, NvU32 hClient, NvU32 hObject, NvU32 cmd,
+                                           void *pParams, NvU32 paramsSize);
 extern "C" int nvrm_surfshare_rm(struct NVRMSurfShareRm *);
 extern "C" int nvrm_surfshare_pageoff(struct NVRMSurfPageoff *, void *nv);
 extern "C" task_t current_task(void);
@@ -1990,6 +1993,22 @@ IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
         if (!accel) return kIOReturnSuccess;
         const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVACCEL_SS_FN);
         if (sym) { accel->callPlatformFunction(sym, false, ss, (void *)current_task(), (void *)(uintptr_t)cmd, NULL); sym->release(); }
+        return kIOReturnSuccess;
+    }
+    case NVRM_ESC_PHYS_CTRL: {
+        // Root-only debug hook (notes/power.md): one RM control with kernel privilege, on the GPU's internal client
+        // through the physical RM API (GSP) or as an internal call on a CPU-RM object. Needs boot-arg nvrmphysctl=1.
+        static int on = -1;
+        if (on < 0) { int v = 0; on = (PE_parse_boot_argn("nvrmphysctl", &v, sizeof(v)) && v) ? 1 : 0; }
+        if (!kauth_cred_issuser(kauth_cred_get())) return kIOReturnNotPrivileged;
+        if (size != sizeof(struct NVRMPhysCtrlEsc)) return kIOReturnBadArgument;
+        struct NVRMPhysCtrlEsc *pc = (struct NVRMPhysCtrlEsc *)data;
+        if (on != 1) { pc->status = NVRM_PHYSCTL_ST_OFF; return kIOReturnSuccess; }
+        if (pc->version != NVRM_PHYSCTL_VERSION) { pc->status = NVRM_PHYSCTL_ST_BAD_VERSION; return kIOReturnSuccess; }
+        if (pc->paramsSize > NVRM_PHYSCTL_MAX_PARAMS) { pc->status = NVRM_PHYSCTL_ST_BAD_SIZE; return kIOReturnSuccess; }
+        pc->status = rm_nvgfx_phys_control(nv, pc->mode, pc->hClient, pc->hObject, pc->cmd, pc->params, pc->paramsSize);
+        kprintf("NVRM-xnu: phys ctrl mode %u cmd 0x%08x size %u by pid %d -> 0x%x\n", pc->mode, pc->cmd, pc->paramsSize,
+                proc_selfpid(), pc->status);
         return kIOReturnSuccess;
     }
     default: {
