@@ -30,6 +30,8 @@ extern "C" {
 #define NVRM_SS_KERNEL_ABI 1
 #include "nvrm_surfshare_abi.h"
 #include "nvrm_physctl_abi.h"
+extern "C" void nvgfx_power_start(nv_state_t *nv);
+extern "C" void nvgfx_power_stop(void);
 extern "C" NV_STATUS rm_nvgfx_phys_control(nv_state_t *nv, NvU32 mode, NvU32 hClient, NvU32 hObject, NvU32 cmd,
                                            void *pParams, NvU32 paramsSize);
 extern "C" int nvrm_surfshare_rm(struct NVRMSurfShareRm *);
@@ -1387,6 +1389,7 @@ IOReturn NVRM::go(uint32_t pass)
         }
         publishGpuProfile();
         if (nvkms_xnu_load()) nvrm_display_publish(this, fNv.gpu_id);
+        nvgfx_power_start(nv);   // boot-arg nvrmtgp=1: TGP mode on while on AC (nvrm_power.cpp)
     }
     return kIOReturnSuccess;
 }
@@ -1409,6 +1412,7 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
 
 void NVRM::stop(IOService *provider)
 {
+    nvgfx_power_stop();
     if (fPmJoined) { PMstop(); fPmJoined = false; }
     if (fAdapter) { rm_shutdown_adapter(NULL, &fNv); fAdapter = false; }
     if (fIntSrc) { fIntSrc->disable(); if (fWorkLoop) fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL; }
