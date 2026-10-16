@@ -1373,6 +1373,22 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
     rt.a2c = d.alphaToCoverageEnabled ? 1u : 0u; rt.a2one = d.alphaToOneEnabled ? 1u : 0u;
     nvk_blend_state blend = rt.blend[0]; uint32_t cvk = rt.cfmt[0];
     ps->_vname = vf->_fname; ps->_fname = ff->_fname;
+    if (nvgfx_wstrace_on()) {
+        // N-76: keep the translated shaders of WindowServer's blur and window-flattening passes for offline reading.
+        static NSMutableSet *dumped; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+        for (int st = 0; st < 2; st++) {
+            NVMTLFunction *f = st ? ff : vf; NSString *nm = f->_fname;
+            if (!nm || !([nm containsString:@"blur"] || [nm containsString:@"downsample"] || [nm containsString:@"Uber"] ||
+                         [nm hasPrefix:@"Timg"] || [nm hasPrefix:@"Tcim"] || [nm containsString:@"Copy"] || [nm containsString:@"GPUPass"])) continue;
+            pthread_mutex_lock(&mu); if (!dumped) dumped = [NSMutableSet new]; BOOL fresh = ![dumped containsObject:nm]; if (fresh) [dumped addObject:nm];
+            pthread_mutex_unlock(&mu);
+            if (!fresh) continue;
+            NSString *base = [@"/Library/GPUBundles/nvmtl/aircache/nvgfx-" stringByAppendingString:nm];
+            BOOL a = f->_spirv.length && [f->_spirv writeToFile:[base stringByAppendingString:@".spv"] atomically:NO];
+            BOOL b = f->_air.length && [f->_air writeToFile:[base stringByAppendingString:@".air"] atomically:NO];
+            nvgfx_wstrace("dumped %s spv %d air %d", nm.UTF8String, (int)a, (int)b);
+        }
+    }
     ps->_blend = [NSString stringWithFormat:@"%u rgb(%u,%u,op %u) a(%u,%u,op %u) mask %x fmt %u", blend.enabled, blend.src_rgb, blend.dst_rgb,
         blend.op_rgb, blend.src_alpha, blend.dst_alpha, blend.op_alpha, blend.write_mask, (unsigned)cvk];
     if (blend.enabled || blend.write_mask != 0xf) nvlog("pipeline: blend %u rgb(%u,%u,op %u) alpha(%u,%u,op %u) vkmask %x", blend.enabled,
