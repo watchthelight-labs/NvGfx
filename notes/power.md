@@ -66,3 +66,12 @@ CMD and WORDs are hex, WORDs are little-endian 32-bit params, `--size` pads the 
 subdevice (or device/client). The reply prints the status and the params as words.
 
 Caution: these controls write GPU power policy. Start with GET controls; a bad SET can hang GSP or the GPU.
+
+## N-73 result and the nvrmtgp manager (N-74)
+- N-73: GSP `INTERNAL_PMGR_PFM_REQ_HNDLR_CONFIGURE_TGP_MODE` (0x20800AD2, 1-byte `bEnable`) = 1 lifts the enforced limit
+  from the VBIOS 50 W to 115 W. Burn 12.1 to 17.8 TFLOP/s, about 2.3 GHz, up to 116 W, 66 C, no throttle.
+- `nvrmtgp=1` (kexts/NVRM/nvrm_power.cpp): after the GPU is up, sends TGP mode on while `_PSR` says AC and off on
+  battery, polled every 5 s, only on change, through `rm_nvgfx_phys_control` (internal client, physical API).
+- Sysctls: `debug.nvgfx_tgp_enable` (RW, 1 auto, 0 force off), `debug.nvgfx_tgp_state`, `debug.nvgfx_tgp_ac`,
+  `debug.nvgfx_tgp_last_status`, `debug.nvgfx_tgp_applies`.
+- `thread_call_cancel_wait` is not exported to kexts (install CHECK caught it); stop uses cancel, wait, free.
