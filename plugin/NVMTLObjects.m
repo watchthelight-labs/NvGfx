@@ -2647,6 +2647,22 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
     return YES;
 }
 static const void *NVGFX_FTEX_KEY = &NVGFX_FTEX_KEY;
+static const void *NVGFX_FSAMP_KEY = &NVGFX_FSAMP_KEY;
+static const void *NVGFX_CAP_KEY = &NVGFX_CAP_KEY;   // set when the next draw call should be logged (N-83 capture)
+// N-83: hex dump of a CPU-visible bound buffer, 96 bytes per syslog line
+static void nvgfx_cap_hex(const char *tag, NSDictionary *at, unsigned idx, size_t want)
+{
+    NSArray *e = at[@(idx)]; if (!e) return;
+    NVMTLBuffer *nb = e[0]; size_t off = [e[1] unsignedLongValue];
+    if (!nb->_b.map) { nvgfx_wstrace("CAP %s[%u] off %zu len %zu not CPU-visible", tag, idx, off, nb->_b.size); return; }
+    size_t len = nb->_b.size > off ? nb->_b.size - off : 0; if (len > want) len = want;
+    const uint8_t *p = (const uint8_t *)nb->_b.map + off;
+    for (size_t o = 0; o < len; o += 96) {
+        char hx[200]; size_t k = 0;
+        for (size_t j = o; j < len && j < o + 96; j++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", p[j]);
+        nvgfx_wstrace("CAP %s[%u] +%zu/%zu: %s", tag, idx, o, len, hx);
+    }
+}
 static BOOL nvgfx_ws_interesting(NSString *n)
 {
     return n && ([n containsString:@"Isup"] || [n hasPrefix:@"Tbds"] || [n containsString:@"blur"] || [n containsString:@"downsample"]);
@@ -2666,6 +2682,16 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                           [[[ft description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String],
                           fj ? [[NSString alloc] initWithData:fj encoding:NSUTF8StringEncoding].UTF8String : "-",
                           _ps->_vdesc.UTF8String ?: "-");
+            static _Atomic unsigned ncap;
+            if (atomic_fetch_add(&ncap, 1) < 6) {   // N-83: everything needed to replay this draw offline
+                NSDictionary *fsd = objc_getAssociatedObject(self, NVGFX_FSAMP_KEY);
+                nvgfx_wstrace("CAP begin fs %s target %ux%u fmt %u samplers %s", _ps->_fname.UTF8String, _target ? [_target nvi]->w : 0u,
+                              _target ? [_target nvi]->h : 0u, _target ? [_target nvi]->fmt : 0u,
+                              fsd ? [[[fsd description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String] : "-");
+                for (unsigned i = 0; i <= 8; i++) nvgfx_cap_hex("FBUF", _fbufAt, i, 512);
+                for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("VBUF", _vbufAt, i, 480);
+                objc_setAssociatedObject(self, NVGFX_CAP_KEY, @1, OBJC_ASSOCIATION_RETAIN);
+            }
         }
     }
     if (nvgfx_wstrace_on() && nvgfx_ws_interesting(_ps->_fname)) {
@@ -3019,6 +3045,13 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (!_fragmentSamplers) _fragmentSamplers=[NSMutableDictionary new];
     NSString *key=[@(i) stringValue];
     if(ns && ns->_pixelState) _fragmentSamplers[key]=ns->_pixelState;else [_fragmentSamplers removeObjectForKey:key];
+    if (nvgfx_wstrace_on() && ns) {
+        NSMutableDictionary *fsd = objc_getAssociatedObject(self, NVGFX_FSAMP_KEY);
+        if (!fsd) { fsd = [NSMutableDictionary new]; objc_setAssociatedObject(self, NVGFX_FSAMP_KEY, fsd, OBJC_ASSOCIATION_RETAIN); }
+        fsd[key] = [NSString stringWithFormat:@"lin%d full%d min%u mag%u mip%u addr%u/%u lod%.1f..%.1f px%d", ns->_s.linear, ns->_s.full_state,
+                    ns->_s.desc.min_filter, ns->_s.desc.mag_filter, ns->_s.desc.mip_filter, ns->_s.desc.address_s, ns->_s.desc.address_t,
+                    ns->_s.desc.lod_min, ns->_s.desc.lod_max, ns->_pixelState != nil];
+    }
     if (nvgfx_wstrace_on() && _ps && nvgfx_ws_interesting(_ps->_fname) && ns) {
         static _Atomic unsigned nlog; if (atomic_fetch_add(&nlog, 1) < 60)
             nvgfx_wstrace("FSAMP fs %s slot %lu linear %d full %d min %u mag %u mip %u addr %u/%u pixel %d", _ps->_fname.UTF8String, (unsigned long)i,
@@ -3071,6 +3104,11 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
          instanceCount:(NSUInteger)instances baseInstance:(NSUInteger)baseInstance {
     if (!_begun) { nvlog("encoder: draw with no pipeline set"); return; }
     if (![self nvmtlBindSamplerPipeline]) return;
+    if (nvgfx_wstrace_on() && objc_getAssociatedObject(self, NVGFX_CAP_KEY)) {
+        objc_setAssociatedObject(self, NVGFX_CAP_KEY, nil, OBJC_ASSOCIATION_RETAIN);
+        nvgfx_wstrace("CAP draw type %u start %lu count %lu inst %lu baseI %lu", (unsigned)type, (unsigned long)start, (unsigned long)count,
+                      (unsigned long)instances, (unsigned long)baseInstance);
+    }
     nvtrace("DRAW type %u | vs %s | fs %s | blend %s", (unsigned)type, _ps ? _ps->_vname.UTF8String : "-", _ps ? _ps->_fname.UTF8String : "-", _ps ? _ps->_blend.UTF8String : "-");
     if (nvmtl_trace_on()) { char bufs_[600]; nvmtl_vk_trace_buffers(&_cb->_c, bufs_, sizeof bufs_); nvtrace("  BUFS%s", bufs_); }
     if (nvmtl_vk_cmd_set_topology(&_cb->_c, (unsigned)type)) return;
@@ -3328,6 +3366,15 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (!b) { nvlog("drawIndexedPrimitives with no index buffer"); return; }
     nvmtl_retain_resource(_cb, b);
     if (![self nvmtlBindSamplerPipeline]) return;
+    if (nvgfx_wstrace_on() && objc_getAssociatedObject(self, NVGFX_CAP_KEY)) {   // N-83 capture: the draw call itself
+        objc_setAssociatedObject(self, NVGFX_CAP_KEY, nil, OBJC_ASSOCIATION_RETAIN);
+        char ix[200]; size_t k = 0; const uint8_t *ip = b->_b.map ? (const uint8_t *)b->_b.map + off : NULL;
+        for (unsigned j = 0; ip && j < 24 && j < count; j++)
+            k += (size_t)snprintf(ix + k, sizeof ix - k, "%u ", it == MTLIndexTypeUInt16 ? ((const uint16_t *)ip)[j] : ((const uint32_t *)ip)[j]);
+        ix[k < sizeof ix ? k : sizeof ix - 1] = 0;
+        nvgfx_wstrace("CAP draw indexed type %u count %lu itype %lu inst %lu baseV %ld baseI %lu indices %s", (unsigned)type, (unsigned long)count,
+                      (unsigned long)it, (unsigned long)instances, (long)baseVertex, (unsigned long)baseInstance, ip ? ix : "(not CPU-visible)");
+    }
     nvtrace("DRAW type %u | vs %s | fs %s | blend %s", (unsigned)type, _ps ? _ps->_vname.UTF8String : "-", _ps ? _ps->_fname.UTF8String : "-", _ps ? _ps->_blend.UTF8String : "-");
     if (nvmtl_trace_on()) { char bufs_[600]; nvmtl_vk_trace_buffers(&_cb->_c, bufs_, sizeof bufs_); nvtrace("  BUFS%s", bufs_); }
     if (nvmtl_vk_cmd_set_topology(&_cb->_c, (unsigned)type)) return;
