@@ -45,6 +45,7 @@
 #include "ctrl/ctrl2080/ctrl2080thermal.h"
 #include "ctrl/ctrl2080/ctrl2080pmgr.h"
 #include "ctrl/ctrl00de.h"
+#include "../../kexts/NVRM/nvrm_physctl_abi.h"
 
 #ifndef NV2080_CTRL_CMD_PERF_RATED_TDP_GET_STATUS
 #define NV2080_CTRL_CMD_PERF_RATED_TDP_GET_STATUS 0x2080206dU
@@ -732,6 +733,41 @@ static int raw_ctrl(Rm *rm, NvU32 cmd, const NvU32 *words, int nwords, NvU32 siz
     return st != 0;
 }
 
+// --phys: one control with kernel privilege through the kext's root-only NVRM_ESC_PHYS_CTRL (boot-arg nvrmphysctl=1).
+// Default: the physical RM API (GSP) on RM's internal client and subdevice (--target dev / client for the others).
+// --kernel: an internal-call control on this tool's own CPU-RM subdevice (or device / client with --target).
+static int phys_ctrl(Rm *rm, NvU32 cmd, const NvU32 *words, int nwords, NvU32 size, int target, int kernel)
+{
+    static struct NVRMPhysCtrlEsc pc;
+    memset(&pc, 0, sizeof pc);
+    if (size < (NvU32)nwords * 4) size = (NvU32)nwords * 4;
+    if (size > NVRM_PHYSCTL_MAX_PARAMS) size = NVRM_PHYSCTL_MAX_PARAMS;
+    memcpy(pc.params, words, (size_t)nwords * 4);
+    pc.version = NVRM_PHYSCTL_VERSION;
+    pc.cmd = cmd;
+    pc.paramsSize = size;
+    if (kernel) {
+        pc.mode = NVRM_PHYSCTL_KERNEL;
+        pc.hClient = rm->hClient;
+        pc.hObject = target == 2 ? rm->hClient : target == 1 ? rm->hDevice : rm->hSubdev;
+    } else pc.mode = target == 2 ? NVRM_PHYSCTL_PHYS_CLIENT : target == 1 ? NVRM_PHYSCTL_PHYS_DEVICE : NVRM_PHYSCTL_PHYS_SUBDEV;
+    kern_return_t kr = esc(&rm->ctl, NVRM_ESC_PHYS_CTRL, &pc, sizeof pc);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "nvgfx-smi: NVRM_ESC_PHYS_CTRL -> kr 0x%08x%s\n", kr, kr == kIOReturnNotPrivileged ? " (run as root)" : "");
+        return 1;
+    }
+    const char *why = pc.status == NVRM_PHYSCTL_ST_OFF ? "boot-arg nvrmphysctl=1 not set"
+                    : pc.status == NVRM_PHYSCTL_ST_BAD_VERSION ? "kext has another escape version"
+                    : pc.status == NVRM_PHYSCTL_ST_BAD_SIZE ? "params too large" : rm_status_name(pc.status);
+    printf("phys %s control 0x%08x size %u -> 0x%08x %s\n", kernel ? "kernel" : "gsp", cmd, size, pc.status, why);
+    for (NvU32 i = 0; i < size; i += 4) {
+        NvU32 w; memcpy(&w, pc.params + i, 4);
+        printf("%s%08x", (i % 32) ? " " : (i ? "\n  " : "  "), w);
+    }
+    printf("\n");
+    return pc.status != 0;
+}
+
 static void usage(void)
 {
     fprintf(stderr,
@@ -741,19 +777,32 @@ static void usage(void)
         "  --watch [ms]  CSV, one line per interval (default 1000 ms) until Ctrl-C\n"
         "  --verbose     log transport details to stderr\n"
         "  --ctrl CMD [WORD...] [--size N] [--binapi|--priv]\n"
-        "                send one raw RM control (hex cmd, hex 32-bit param words) and dump the reply\n");
+        "                send one raw RM control (hex cmd, hex 32-bit param words) and dump the reply\n"
+        "  --phys CMD [WORD...] [--size N] [--target sub|dev|client] [--kernel]\n"
+        "                root only, kext boot-arg nvrmphysctl=1: send one control with kernel privilege, to GSP on\n"
+        "                RM's internal client (default) or as an internal call on this tool's own object (--kernel)\n");
 }
 
 int main(int argc, char **argv)
 {
-    int mode = 0;   // 0 once, 1 json, 2 watch, 3 ctrl
+    int mode = 0;   // 0 once, 1 json, 2 watch, 3 ctrl, 4 phys
     unsigned intervalMs = 1000;
-    NvU32 ctrlCmd = 0, ctrlWords[256], ctrlSize = 0; int ctrlN = 0, ctrlVia = 0;
+    NvU32 ctrlCmd = 0, ctrlWords[1024], ctrlSize = 0; int ctrlN = 0, ctrlVia = 0, physTarget = 0, physKernel = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--ctrl") && i + 1 < argc) {
             mode = 3; ctrlCmd = (NvU32)strtoul(argv[++i], NULL, 16);
             while (i + 1 < argc && argv[i + 1][0] != '-' && ctrlN < 256) ctrlWords[ctrlN++] = (NvU32)strtoul(argv[++i], NULL, 16);
         }
+        else if (!strcmp(argv[i], "--phys") && i + 1 < argc) {
+            mode = 4; ctrlCmd = (NvU32)strtoul(argv[++i], NULL, 16);
+            while (i + 1 < argc && argv[i + 1][0] != '-' && ctrlN < 1024) ctrlWords[ctrlN++] = (NvU32)strtoul(argv[++i], NULL, 16);
+        }
+        else if (!strcmp(argv[i], "--target") && i + 1 < argc) {
+            const char *t = argv[++i];
+            physTarget = !strcmp(t, "client") ? 2 : !strcmp(t, "dev") ? 1 : !strcmp(t, "sub") ? 0 : -1;
+            if (physTarget < 0) { usage(); return 2; }
+        }
+        else if (!strcmp(argv[i], "--kernel")) physKernel = 1;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) ctrlSize = (NvU32)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--binapi")) ctrlVia = 1;
         else if (!strcmp(argv[i], "--priv")) ctrlVia = 2;
@@ -770,6 +819,7 @@ int main(int argc, char **argv)
     Rm rm;
     if (rm_open(&rm)) { print_status_log(stderr); rm_close(&rm); return 1; }
     if (mode == 3) { int r = raw_ctrl(&rm, ctrlCmd, ctrlWords, ctrlN, ctrlSize, ctrlVia); rm_close(&rm); return r; }
+    if (mode == 4) { int r = phys_ctrl(&rm, ctrlCmd, ctrlWords, ctrlN, ctrlSize, physTarget, physKernel); rm_close(&rm); return r; }
     rusd_open(&rm);
     thermal_find_sensor(&rm);
 
