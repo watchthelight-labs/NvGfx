@@ -21,8 +21,8 @@ NVK_DST=$(cd "$OUT" && find . -name libvulkan_nouveau.dylib | head -1); [ -n "${
 swap_kext "${NVGFX_NVRM:-}" "$OUT/Library/Extensions/NVRM.kext"
 swap_kext "${NVGFX_NVRMFB:-}" "$OUT/Library/Extensions/NVRMFB.kext"
 swap_kext "${NVGFX_NVACCEL15:-}" "$OUT/Library/Extensions/NVAccel.kext"
-[ -d "$OUT/kexts/15/NVAccel.kext" ] && swap_kext "${NVGFX_NVACCEL15:-}" "$OUT/kexts/15/NVAccel.kext"
-[ -d "$OUT/kexts/26/NVAccel.kext" ] && swap_kext "${NVGFX_NVACCEL26:-}" "$OUT/kexts/26/NVAccel.kext"
+[ -d "$OUT/Library/NullMoth/kexts/15/NVAccel.kext" ] && swap_kext "${NVGFX_NVACCEL15:-}" "$OUT/Library/NullMoth/kexts/15/NVAccel.kext"
+[ -d "$OUT/Library/NullMoth/kexts/26/NVAccel.kext" ] && swap_kext "${NVGFX_NVACCEL26:-}" "$OUT/Library/NullMoth/kexts/26/NVAccel.kext"
 codesign -f -s - "$B" 2>/dev/null   # the shipped bundle is ad-hoc signed as a bundle
 # Rewrite the identity of the four paired kexts the same way the shipped file lists them, then every checksum.
 /usr/bin/python3 - "$OUT" <<'PY'
