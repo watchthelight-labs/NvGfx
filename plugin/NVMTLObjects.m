@@ -2615,8 +2615,26 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
     for (NSString *k in m) { NSMutableDictionary *st = [m[k] mutableCopy]; st[@"lod_max_clamp"] = @65504.0f; o[k] = st; }
     return o;
 }
+static const void *NVGFX_FTEX_KEY = &NVGFX_FTEX_KEY;
+static BOOL nvgfx_ws_interesting(NSString *n)
+{
+    return n && ([n containsString:@"Isup"] || [n hasPrefix:@"Tbds"] || [n containsString:@"blur"] || [n containsString:@"downsample"]);
+}
 - (BOOL)nvmtlBindSamplerPipeline {
     if (!_ps) return NO;
+    if (nvgfx_wstrace_on() && nvgfx_ws_interesting(_ps->_fname)) {
+        static NSMutableDictionary *seen; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&mu); if (!seen) seen = [NSMutableDictionary new];
+        NSUInteger k = [seen[_ps->_fname] unsignedIntegerValue]; seen[_ps->_fname] = @(k + 1); pthread_mutex_unlock(&mu);
+        if (k < 3) {
+            NSDictionary *ft = objc_getAssociatedObject(self, NVGFX_FTEX_KEY);
+            NSData *fj = _fragmentSamplers.count ? [NSJSONSerialization dataWithJSONObject:_fragmentSamplers options:NSJSONWritingSortedKeys error:NULL] : nil;
+            nvgfx_wstrace("DRAW fs %s vs %s target %ux%u | ftex %s | pixel samplers %s", _ps->_fname.UTF8String, _ps->_vname.UTF8String,
+                          _target ? [_target nvi]->w : 0u, _target ? [_target nvi]->h : 0u,
+                          ft ? [[[ft description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String] : "-",
+                          fj ? [[NSString alloc] initWithData:fj encoding:NSUTF8StringEncoding].UTF8String : "-");
+        }
+    }
     NVMTLRenderPipelineState *selected=_ps;
     if(_vertexSamplers.count || _fragmentSamplers.count) {
         NSDictionary *vS=nvmtl_pixel_sampler_norm(_vertexSamplers),*fS=nvmtl_pixel_sampler_norm(_fragmentSamplers);
@@ -2951,6 +2969,12 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (!_fragmentSamplers) _fragmentSamplers=[NSMutableDictionary new];
     NSString *key=[@(i) stringValue];
     if(ns && ns->_pixelState) _fragmentSamplers[key]=ns->_pixelState;else [_fragmentSamplers removeObjectForKey:key];
+    if (nvgfx_wstrace_on() && _ps && nvgfx_ws_interesting(_ps->_fname) && ns) {
+        static _Atomic unsigned nlog; if (atomic_fetch_add(&nlog, 1) < 60)
+            nvgfx_wstrace("FSAMP fs %s slot %lu linear %d full %d min %u mag %u mip %u addr %u/%u pixel %d", _ps->_fname.UTF8String, (unsigned long)i,
+                          ns->_s.linear, ns->_s.full_state, ns->_s.desc.min_filter, ns->_s.desc.mag_filter, ns->_s.desc.mip_filter,
+                          ns->_s.desc.address_s, ns->_s.desc.address_t, ns->_pixelState != nil);
+    }
     nvtrace("FRAGMENT SAMPLER[%lu] pixel=%d bound=%d",(unsigned long)i,ns && ns->_pixelState!=nil,ns!=nil);
     if(ns) { if (!_cb->_resources) _cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:ns]; }
 }
@@ -2968,6 +2992,12 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 - (void)setFragmentTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i {
     NVMTLTexture *nt = (NVMTLTexture *)t;
     if (!nt) { nvlog("setFragmentTexture: nil at index %lu", (unsigned long)i); return; }
+    if (nvgfx_wstrace_on()) {
+        NSMutableDictionary *ft = objc_getAssociatedObject(self, NVGFX_FTEX_KEY);
+        if (!ft) { ft = [NSMutableDictionary new]; objc_setAssociatedObject(self, NVGFX_FTEX_KEY, ft, OBJC_ASSOCIATION_RETAIN); }
+        ft[[@(i) stringValue]] = [NSString stringWithFormat:@"%lux%lu fmt %lu mips %lu base %lu type %lu", (unsigned long)t.width, (unsigned long)t.height,
+                                  (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, (unsigned long)t.parentRelativeLevel, (unsigned long)t.textureType];
+    }
     nvmtl_retain_resource(_cb, nt);
     nvmtl_surface_cpu_dump(nt->_parent ? nt->_parent : nt);
     nvmtl_surface_in_for_cb(_cb, nt);
