@@ -19,6 +19,7 @@
 #include <sys/uio.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
+#include <i386/machine_routines.h>
 #include <sys/proc.h>
 #include <sys/kauth.h>
 
@@ -1358,9 +1359,10 @@ void  NV_API_CALL nv_acpi_methods_uninit(void) { TRC; }
 // backlight tables from the firmware: the NBCI _DSM functions GETOBJBYTYPE (0x10) and GETBACKLIGHT
 // (0x14), plus the display ACPI ids from _DOD. Without them NV0073_CTRL_CMD_SPECIFIC_GET_BACKLIGHT_BRIGHTNESS
 // fails with NV_ERR_NOT_SUPPORTED and NVKMS never calls nvkms_register_backlight().
-// Both are evaluated on the GPU's ACPI node, as kernel-open/nvidia/nv-acpi.c does. Only NBCI is answered:
+// Both are evaluated on the GPU's ACPI node, as kernel-open/nvidia/nv-acpi.c does. Only NBCI is answered here:
 // RM asks each _DSM GUID for its functions separately (_acpiDsmSupportedFuncCacheInit), so every other
-// GUID (NVHG, MXM, NVOP, GPS, JT, NVPCF...) stays "not supported", as before.
+// GUID (NVHG, MXM, NVOP, JT...) stays "not supported", as before. GPS and NVPCF have their own opt-in
+// boot-args (nvrmgps, nvrmnvpcf; see nv_acpi_dsm_method).
 extern "C" {
 #include "nbci.h"
 }
@@ -1457,19 +1459,102 @@ NV_STATUS NV_API_CALL nv_acpi_dod_method(nv_state_t *nv, NvU32 *pOutData, NvU32 
     return st;
 }
 
+// Platform power (notes/power.md). Two more opt-in _DSM families, each behind its own boot-arg and independent of
+// nvrmacpibl (which keeps gating NBCI and _DOD exactly as before):
+//   nvrmgps=1    GPS (the Platform Request Handler's _DSM, GPS_DSM_GUID) on the GPU's own ACPI node, any subfunction,
+//                revision as RM passes it (0x200 for GPS_2X).
+//   nvrmnvpcf=1  NVPCF (acpiNvpcfDsmFunction or NVPCF_ACPI_DSM_GUID) on \_SB.NPCF (HID NVDA0820), as nv-acpi.c does
+//                with the "\_SB.NPCF._DSM" path.
+// Arg3 is a Buffer of inParamSize bytes for both, as nv_acpi_evaluate_dsm_method() builds it (bArg3Integer false);
+// this firmware reads Arg3 of both with CreateDWordField/CreateField, which needs a Buffer.
+// With neither set nothing here runs and RM sees the same answers as before.
+static bool nv_xnu_bootarg_flag(const char *name, int *cache)
+{
+    if (*cache < 0) { int v = 0; *cache = (PE_parse_boot_argn(name, &v, sizeof(v)) && v) ? 1 : 0; }
+    return *cache == 1;
+}
+static int nv_xnu_gps_cache = -1, nv_xnu_nvpcf_cache = -1;
+static bool nv_xnu_gps_on(void)   { return nv_xnu_bootarg_flag("nvrmgps", &nv_xnu_gps_cache); }
+static bool nv_xnu_nvpcf_on(void) { return nv_xnu_bootarg_flag("nvrmnvpcf", &nv_xnu_nvpcf_cache); }
+static bool nv_xnu_platpower_on(void) { return nv_xnu_gps_on() || nv_xnu_nvpcf_on(); }
+
+static const NvU8 nv_xnu_gps_guid[16]   = { 0x01, 0x2D, 0x13, 0xA3, 0xDA, 0x8C, 0xBA, 0x49,      // GPS_DSM_GUID
+                                            0xA5, 0x2E, 0xBC, 0x9D, 0x46, 0xDF, 0x6B, 0x81 };    // {A3132D01-8CDA-49BA-A52E-BC9D46DF6B81}
+static const NvU8 nv_xnu_nvpcf_guid[16] = { 0x10, 0x97, 0xB4, 0x36, 0x83, 0x24, 0xE7, 0x11,      // NVPCF_ACPI_DSM_GUID
+                                            0x95, 0x98, 0x08, 0x00, 0x20, 0x0C, 0x9A, 0x66 };    // {36B49710-2483-11E7-9598-0800200C9A66}
+
+// First 20 calls, then every 256th.
+static bool nv_xnu_log_tick(volatile UInt32 *n) { UInt32 k = (UInt32)OSIncrementAtomic((volatile SInt32 *)n); return k < 20 || (k % 256) == 0; }
+
+// An IOACPIPlane device by its ACPI "name" (the _HID AppleACPIPlatform publishes), optionally tried by path first.
+// Looked up once and kept retained for the life of the kext; NULL is cached too.
+static IOACPIPlatformDevice *nv_xnu_acpi_find(const char *path, const char *hid)
+{
+    if (path) {
+        IORegistryEntry *e = IORegistryEntry::fromPath(path);
+        IOACPIPlatformDevice *d = OSDynamicCast(IOACPIPlatformDevice, e);
+        if (d) return d;
+        OSSafeReleaseNULL(e);
+    }
+    const IORegistryPlane *plane = IORegistryEntry::getPlane("IOACPIPlane");
+    IORegistryIterator *it = plane ? IORegistryIterator::iterateOver(plane, kIORegistryIterateRecursively) : NULL;
+    if (!it) return NULL;
+    IOACPIPlatformDevice *found = NULL;
+    size_t hl = strlen(hid);
+    while (IORegistryEntry *e = it->getNextObject()) {
+        IOACPIPlatformDevice *d = OSDynamicCast(IOACPIPlatformDevice, e);
+        OSData *n = d ? OSDynamicCast(OSData, d->getProperty("name")) : NULL;
+        if (!n || n->getLength() < hl || n->getLength() > hl + 1 || memcmp(n->getBytesNoCopy(), hid, hl) != 0) continue;
+        found = d; found->retain(); break;
+    }
+    it->release();
+    return found;
+}
+struct nv_xnu_acpi_cached { IOACPIPlatformDevice *dev; volatile SInt32 state; };   // state 0 unknown, 1 looked up
+static IOACPIPlatformDevice *nv_xnu_acpi_cached_get(nv_xnu_acpi_cached *c, const char *path, const char *hid)
+{
+    if (c->state) return c->dev;
+    IOACPIPlatformDevice *d = nv_xnu_acpi_find(path, hid);
+    if (!OSCompareAndSwapPtr(NULL, d, (void * volatile *)&c->dev)) { OSSafeReleaseNULL(d); }
+    else if (d) kprintf("NVRM-xnu: ACPI %s -> %s\n", hid, d->getName());
+    else kprintf("NVRM-xnu: ACPI %s not found\n", hid);
+    c->state = 1;
+    return c->dev;
+}
+static nv_xnu_acpi_cached nv_xnu_npcf_dev, nv_xnu_bat_dev, nv_xnu_adp_dev;
+static IOACPIPlatformDevice *nv_xnu_npcf(void) { return nv_xnu_acpi_cached_get(&nv_xnu_npcf_dev, "IOACPIPlane:/_SB/NPCF", "NVDA0820"); }
+static IOACPIPlatformDevice *nv_xnu_battery(void) { return nv_xnu_acpi_cached_get(&nv_xnu_bat_dev, NULL, "PNP0C0A"); }
+static IOACPIPlatformDevice *nv_xnu_adapter(void) { return nv_xnu_acpi_cached_get(&nv_xnu_adp_dev, NULL, "ACPI0003"); }
+
+// AML can sleep (EC mutexes: this firmware's _PSR and _BIX wait up to 40 s on LFCM). Linux refuses _DSM when
+// !NV_MAY_SLEEP(); do the same for the new calls.
+static bool nv_xnu_acpi_may_sleep(void) { return ml_get_interrupts_enabled() && !os_is_isr(); }
+
 NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU32 acpiDsmRev, NvBool acpiNvpcfDsmFunction,
                                          NvU32 acpiDsmSubFunction, void *pInParams, NvU16 inParamSize, NvU32 *outStatus,
                                          void *pOutData, NvU16 *pSize)
 {
     TRC;
-    if (!nv_xnu_acpi_backlight_on()) return NV_ERR_NOT_SUPPORTED;
+    const bool bl = nv_xnu_acpi_backlight_on(), gps = nv_xnu_gps_on(), pcf = nv_xnu_nvpcf_on();
+    if (!bl && !gps && !pcf) return NV_ERR_NOT_SUPPORTED;
     if (!pAcpiDsmGuid || !pInParams || inParamSize > NV_XNU_MAX_ACPI_DSM_PARAM_SIZE || !pOutData || !pSize)
         return NV_ERR_INVALID_ARGUMENT;
-    if (acpiNvpcfDsmFunction || memcmp(pAcpiDsmGuid, nv_xnu_nbci_guid, sizeof nv_xnu_nbci_guid) != 0 ||
-        (acpiDsmSubFunction != 0 /* NV_ACPI_ALL_FUNC_SUPPORT */ && acpiDsmSubFunction != NV_NBCI_FUNC_GETOBJBYTYPE &&
-         acpiDsmSubFunction != NV_NBCI_FUNC_GETBACKLIGHT))
-        return NV_ERR_NOT_SUPPORTED;
-    IOACPIPlatformDevice *acpi = nv_xnu_gpu_acpi(nv);
+    enum { K_NBCI, K_GPS, K_NVPCF } kind;
+    if (acpiNvpcfDsmFunction || memcmp(pAcpiDsmGuid, nv_xnu_nvpcf_guid, 16) == 0) {
+        if (!pcf) return NV_ERR_NOT_SUPPORTED;
+        kind = K_NVPCF;
+    } else if (memcmp(pAcpiDsmGuid, nv_xnu_gps_guid, 16) == 0) {
+        if (!gps) return NV_ERR_NOT_SUPPORTED;
+        kind = K_GPS;
+    } else {
+        if (!bl || memcmp(pAcpiDsmGuid, nv_xnu_nbci_guid, sizeof nv_xnu_nbci_guid) != 0 ||
+            (acpiDsmSubFunction != 0 /* NV_ACPI_ALL_FUNC_SUPPORT */ && acpiDsmSubFunction != NV_NBCI_FUNC_GETOBJBYTYPE &&
+             acpiDsmSubFunction != NV_NBCI_FUNC_GETBACKLIGHT))
+            return NV_ERR_NOT_SUPPORTED;
+        kind = K_NBCI;
+    }
+    if (kind != K_NBCI && !nv_xnu_acpi_may_sleep()) return NV_ERR_NOT_SUPPORTED;
+    IOACPIPlatformDevice *acpi = kind == K_NVPCF ? nv_xnu_npcf() : nv_xnu_gpu_acpi(nv);
     if (!acpi) return NV_ERR_NOT_SUPPORTED;
 
     OSObject *args[4] = { OSData::withBytes(pAcpiDsmGuid, 16), OSNumber::withNumber(acpiDsmRev, 32),
@@ -1485,19 +1570,81 @@ NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU
         *pSize = (NvU16)len;
     }
     OSSafeReleaseNULL(o);
-    // One line per subfunction, every GETBACKLIGHT call. A flat cap of 8 lines was spent by the support query and
-    // the GETOBJBYTYPE fetches at GPU start, so a laptop log never showed whether the backlight table was asked for.
-    // For the support query the first word is the firmware's subfunction bitmask (bit 0x14 = GETBACKLIGHT).
-    static NvU32 loggedMask;
-    const NvU32 bit = 1u << (acpiDsmSubFunction & 31);
-    if (acpiDsmSubFunction == NV_NBCI_FUNC_GETBACKLIGHT || !(loggedMask & bit)) {
-        loggedMask |= bit;
-        NvU32 word = 0;
-        if (st == NV_OK && *pSize >= sizeof(word)) memcpy(&word, pOutData, sizeof(word));
-        kprintf("NVRM-xnu: NBCI _DSM 0x%x -> 0x%x (%u B%s0x%x)\n", acpiDsmSubFunction, st, (unsigned)*pSize,
-                acpiDsmSubFunction == NV_NBCI_FUNC_GETBACKLIGHT ? ", backlight table, first word " : ", first word ", word);
+    if (kind == K_NBCI) {
+        // One line per subfunction, every GETBACKLIGHT call. A flat cap of 8 lines was spent by the support query and
+        // the GETOBJBYTYPE fetches at GPU start, so a laptop log never showed whether the backlight table was asked for.
+        // For the support query the first word is the firmware's subfunction bitmask (bit 0x14 = GETBACKLIGHT).
+        static NvU32 loggedMask;
+        const NvU32 bit = 1u << (acpiDsmSubFunction & 31);
+        if (acpiDsmSubFunction == NV_NBCI_FUNC_GETBACKLIGHT || !(loggedMask & bit)) {
+            loggedMask |= bit;
+            NvU32 word = 0;
+            if (st == NV_OK && *pSize >= sizeof(word)) memcpy(&word, pOutData, sizeof(word));
+            kprintf("NVRM-xnu: NBCI _DSM 0x%x -> 0x%x (%u B%s0x%x)\n", acpiDsmSubFunction, st, (unsigned)*pSize,
+                    acpiDsmSubFunction == NV_NBCI_FUNC_GETBACKLIGHT ? ", backlight table, first word " : ", first word ", word);
+        }
+    } else {
+        static volatile UInt32 nGps, nPcf;
+        if (nv_xnu_log_tick(kind == K_GPS ? &nGps : &nPcf))
+            kprintf("NVRM-xnu: %s _DSM 0x%x rev 0x%x in %u B -> 0x%x (%u B, ioret 0x%x)\n", kind == K_GPS ? "GPS" : "NVPCF",
+                    acpiDsmSubFunction, acpiDsmRev, (unsigned)inParamSize, st, (unsigned)*pSize, r);
     }
     return st;
+}
+
+// RM's view of the platform (osapi.h rm_is_system_notebook = nv_is_chassis_notebook || nv_acpi_is_battery_present;
+// it only feeds SYS static config bIsNotebook and the RTD3 default in rm_init_dynamic_power_management, which this
+// port never calls). Linux reads the SMBIOS chassis type; here, with nvrmgps or nvrmnvpcf set, a notebook is a
+// machine whose ACPI has the NVPCF device or a control method battery. Off: FALSE as before.
+extern "C" NvBool nv_xnu_power_is_notebook(void)
+{
+    if (!nv_xnu_platpower_on()) return NV_FALSE;
+    return (nv_xnu_npcf() || nv_xnu_battery()) ? NV_TRUE : NV_FALSE;
+}
+
+// nv-acpi.c nv_acpi_find_battery_info: a battery is present when _BIX[4] (or _BIF[3]) battery technology is 1
+// (rechargeable). Not _STA: Linux avoids it on purpose (removed battery), and this firmware's BAT0 reports _STA 0
+// under macOS anyway. Evaluated once.
+extern "C" NvBool nv_xnu_power_battery_present(void)
+{
+    static int present = -1;
+    if (!nv_xnu_platpower_on()) return NV_FALSE;
+    if (present >= 0) return present ? NV_TRUE : NV_FALSE;
+    IOACPIPlatformDevice *bat = nv_xnu_battery();
+    if (!bat || !nv_xnu_acpi_may_sleep()) return NV_FALSE;
+    int found = 0;
+    static const struct { const char *m; unsigned off; } meth[2] = { { "_BIX", 4 }, { "_BIF", 3 } };
+    for (auto &mt : meth) {
+        OSObject *o = NULL;
+        if (bat->evaluateObject(mt.m, &o) == kIOReturnSuccess) {
+            OSArray *a = OSDynamicCast(OSArray, o);
+            OSNumber *n = (a && a->getCount() > mt.off) ? OSDynamicCast(OSNumber, a->getObject(mt.off)) : NULL;
+            if (n && n->unsigned32BitValue() == 1) found = 1;
+        }
+        OSSafeReleaseNULL(o);
+        if (found) break;
+    }
+    present = found;
+    kprintf("NVRM-xnu: battery %s -> %s\n", bat->getName(), found ? "present" : "absent");
+    return found ? NV_TRUE : NV_FALSE;
+}
+
+// nv-acpi.c nv_acpi_get_powersource: _PSR on the power source device, *ac_plugged = (_PSR == 1). Off: the old stub.
+// No notify handler yet (Linux calls rm_power_source_change_event on 0x80); RM reads it once at init (osinit.c).
+NV_STATUS NV_API_CALL nv_acpi_get_powersource(NvU32 *ac_plugged)
+{
+    if (!nv_xnu_platpower_on()) { NV_XNU_STUB_HIT("nv_acpi_get_powersource"); return NV_ERR_NOT_SUPPORTED; }
+    if (!ac_plugged) return NV_ERR_INVALID_ARGUMENT;
+    IOACPIPlatformDevice *adp = nv_xnu_adapter();
+    if (!adp) return NV_ERR_INVALID_ARGUMENT;
+    if (!nv_xnu_acpi_may_sleep()) return NV_ERR_NOT_SUPPORTED;
+    UInt32 v = 0;
+    IOReturn r = adp->evaluateInteger("_PSR", &v);
+    static volatile UInt32 n;
+    if (nv_xnu_log_tick(&n)) kprintf("NVRM-xnu: _PSR on %s -> ioret 0x%x value %u\n", adp->getName(), r, (unsigned)v);
+    if (r != kIOReturnSuccess) return NV_ERR_GENERIC;
+    *ac_plugged = (v == 0x1);
+    return NV_OK;
 }
 void  NV_API_CALL nv_get_screen_info(nv_state_t *nv, NvU64 *pa, NvU32 *w, NvU32 *h, NvU32 *depth, NvU32 *pitch, NvU64 *size)
 {
