@@ -714,8 +714,9 @@ static int raw_ctrl(Rm *rm, NvU32 cmd, const NvU32 *words, int nwords, NvU32 siz
     if (size > sizeof buf) size = sizeof buf;
     if (size < (NvU32)nwords * 4) size = (NvU32)nwords * 4;
     memcpy(buf, words, (size_t)nwords * 4);
-    NvHandle h = rm->hSubdev;
-    if (via) {
+    NvHandle h = via == 3 ? rm->hClient : rm->hSubdev;
+    if (via == 3) via = 0;
+    else if (via) {
         h = 0xcafe0081;
         NvU32 cls = via == 2 ? 0x2082 : 0x2081, ap = 0;
         NvU32 st = rm_alloc(rm, rm->hSubdev, &h, cls, &ap, sizeof ap);
@@ -740,9 +741,10 @@ static int phys_ctrl(Rm *rm, NvU32 cmd, const NvU32 *words, int nwords, NvU32 si
 {
     static struct NVRMPhysCtrlEsc pc;
     memset(&pc, 0, sizeof pc);
-    if (size < (NvU32)nwords * 4) size = (NvU32)nwords * 4;
+    // --size is exact (RM rejects any mismatch: CONFIGURE_TGP_MODE is a 1-byte NvBool); without it, the words' size.
+    if (!size) size = (NvU32)nwords * 4;
     if (size > NVRM_PHYSCTL_MAX_PARAMS) size = NVRM_PHYSCTL_MAX_PARAMS;
-    memcpy(pc.params, words, (size_t)nwords * 4);
+    memcpy(pc.params, words, (size_t)nwords * 4 < size ? (size_t)nwords * 4 : size);
     pc.version = NVRM_PHYSCTL_VERSION;
     pc.cmd = cmd;
     pc.paramsSize = size;
@@ -751,7 +753,11 @@ static int phys_ctrl(Rm *rm, NvU32 cmd, const NvU32 *words, int nwords, NvU32 si
         pc.hClient = rm->hClient;
         pc.hObject = target == 2 ? rm->hClient : target == 1 ? rm->hDevice : rm->hSubdev;
     } else pc.mode = target == 2 ? NVRM_PHYSCTL_PHYS_CLIENT : target == 1 ? NVRM_PHYSCTL_PHYS_DEVICE : NVRM_PHYSCTL_PHYS_SUBDEV;
-    kern_return_t kr = esc(&rm->ctl, NVRM_ESC_PHYS_CTRL, &pc, sizeof pc);
+    // The escape runs on the connection's nv_state: the ctl connection has no GPU, so use a device connection.
+    Conn dev; memset(&dev, 0, sizeof dev);
+    if (conn_open(&dev, 1)) { fprintf(stderr, "nvgfx-smi: cannot open a device connection\n"); return 1; }
+    kern_return_t kr = esc(&dev, NVRM_ESC_PHYS_CTRL, &pc, sizeof pc);
+    conn_close(&dev);
     if (kr != KERN_SUCCESS) {
         fprintf(stderr, "nvgfx-smi: NVRM_ESC_PHYS_CTRL -> kr 0x%08x%s\n", kr, kr == kIOReturnNotPrivileged ? " (run as root)" : "");
         return 1;
@@ -806,6 +812,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) ctrlSize = (NvU32)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--binapi")) ctrlVia = 1;
         else if (!strcmp(argv[i], "--priv")) ctrlVia = 2;
+        else if (!strcmp(argv[i], "--client")) ctrlVia = 3;
         else if (!strcmp(argv[i], "--once")) mode = 0;
         else if (!strcmp(argv[i], "--json")) mode = 1;
         else if (!strcmp(argv[i], "--watch")) {
