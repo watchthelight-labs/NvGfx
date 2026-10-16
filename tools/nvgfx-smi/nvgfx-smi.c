@@ -704,6 +704,34 @@ static void csv_line(Sample *s, double t0)
 
 static void on_sig(int sig) { (void)sig; gStop = 1; }
 
+// --ctrl: send one raw control (params given as 32-bit little-endian words) and dump the reply. With --binapi the
+// control goes through an NV2081_BINAPI object (NV2082 with --priv), which the kernel forwards to GSP unchecked; that
+// is how a client reaches GSP controls the open kernel does not export. Otherwise it goes to the subdevice.
+static int raw_ctrl(Rm *rm, NvU32 cmd, const NvU32 *words, int nwords, NvU32 size, int via)
+{
+    NvU8 buf[4096] = { 0 };
+    if (size > sizeof buf) size = sizeof buf;
+    if (size < (NvU32)nwords * 4) size = (NvU32)nwords * 4;
+    memcpy(buf, words, (size_t)nwords * 4);
+    NvHandle h = rm->hSubdev;
+    if (via) {
+        h = 0xcafe0081;
+        NvU32 cls = via == 2 ? 0x2082 : 0x2081, ap = 0;
+        NvU32 st = rm_alloc(rm, rm->hSubdev, &h, cls, &ap, sizeof ap);
+        printf("alloc %s 0x%08x %s\n", via == 2 ? "NV2082_BINAPI_PRIVILEGED" : "NV2081_BINAPI", st, rm_status_name(st));
+        if (st) return 1;
+    }
+    NvU32 st = rm_ctrl(rm, h, cmd, buf, size);
+    printf("control 0x%08x size %u -> 0x%08x %s\n", cmd, size, st, rm_status_name(st));
+    for (NvU32 i = 0; i < size; i += 4) {
+        NvU32 w; memcpy(&w, buf + i, 4);
+        printf("%s%08x", (i % 32) ? " " : (i ? "\n  " : "  "), w);
+    }
+    printf("\n");
+    if (via) rm_free(rm, h);
+    return st != 0;
+}
+
 static void usage(void)
 {
     fprintf(stderr,
@@ -711,15 +739,25 @@ static void usage(void)
         "  --once        one human-readable report (default)\n"
         "  --json        one report as JSON\n"
         "  --watch [ms]  CSV, one line per interval (default 1000 ms) until Ctrl-C\n"
-        "  --verbose     log transport details to stderr\n");
+        "  --verbose     log transport details to stderr\n"
+        "  --ctrl CMD [WORD...] [--size N] [--binapi|--priv]\n"
+        "                send one raw RM control (hex cmd, hex 32-bit param words) and dump the reply\n");
 }
 
 int main(int argc, char **argv)
 {
-    int mode = 0;   // 0 once, 1 json, 2 watch
+    int mode = 0;   // 0 once, 1 json, 2 watch, 3 ctrl
     unsigned intervalMs = 1000;
+    NvU32 ctrlCmd = 0, ctrlWords[256], ctrlSize = 0; int ctrlN = 0, ctrlVia = 0;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--once")) mode = 0;
+        if (!strcmp(argv[i], "--ctrl") && i + 1 < argc) {
+            mode = 3; ctrlCmd = (NvU32)strtoul(argv[++i], NULL, 16);
+            while (i + 1 < argc && argv[i + 1][0] != '-' && ctrlN < 256) ctrlWords[ctrlN++] = (NvU32)strtoul(argv[++i], NULL, 16);
+        }
+        else if (!strcmp(argv[i], "--size") && i + 1 < argc) ctrlSize = (NvU32)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--binapi")) ctrlVia = 1;
+        else if (!strcmp(argv[i], "--priv")) ctrlVia = 2;
+        else if (!strcmp(argv[i], "--once")) mode = 0;
         else if (!strcmp(argv[i], "--json")) mode = 1;
         else if (!strcmp(argv[i], "--watch")) {
             mode = 2;
@@ -731,6 +769,7 @@ int main(int argc, char **argv)
 
     Rm rm;
     if (rm_open(&rm)) { print_status_log(stderr); rm_close(&rm); return 1; }
+    if (mode == 3) { int r = raw_ctrl(&rm, ctrlCmd, ctrlWords, ctrlN, ctrlSize, ctrlVia); rm_close(&rm); return r; }
     rusd_open(&rm);
     thermal_find_sensor(&rm);
 
