@@ -2544,6 +2544,7 @@ unsigned nvmtl_apps1_resolve_miss, nvmtl_apps1_resolve_extra, nvmtl_apps1_ds_res
 @interface NVMTLRenderCommandEncoder () { unsigned _groupDepth, _dumpDepth; NSString *_dumpName; BOOL _dumpPso; }
 - (void)nvmtlDumpBoundFragmentBuffers;
 - (BOOL)nvmtlFetchRestart:(nvk_pipeline *)p;
+- (BOOL)nvmtlFetchCopy:(nvk_pipeline *)p;
 - (void)nvmtlCloseVisibility;
 - (void)nvmtlBeginVisibility;
 @end
@@ -2608,6 +2609,25 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
  * buffer and survive; the viewport, scissor, cull and depth/stencil state are set again as after a mesh stage, and an
  * open visibility query is closed and reopened at the same offset (endEncoding adds the parts up).
  */
+// NvGfx (N-81): framebuffer fetch emulated by copies. The pass ends, the attachments this pipeline reads are copied, and
+// the pass resumes with everything loaded, so the draw reads what the earlier draws wrote (nvgfx_fetch_copy.h).
+- (BOOL)nvmtlFetchCopy:(nvk_pipeline *)p {
+    const BOOL vis = _visActive;
+    if (vis) [self nvmtlCloseVisibility];
+    nvmtl_vk_cmd_end_render(&_cb->_c);
+    int cr = nvmtl_vk_fetch_copy(&_cb->_c, &_pass, p->fetch_copy);
+    uint32_t keep = _pass.load; _pass.load = NVMTL_LOAD_ALL;
+    int rc = nvmtl_vk_cmd_begin_pass(&_cb->_c, &_pass, p);
+    _pass.load = keep;
+    if (rc) { _begun = NO; nvlog("encoder: N-81 render pass could not RESUME after a fetch copy - the rest of this encoder is not drawn"); return NO; }
+    nvmtl_vk_cmd_set_cull(&_cb->_c, _cull);
+    if (_hasVP) nvmtl_vk_cmd_set_viewport(&_cb->_c, _vp[0], _vp[1], _vp[2], _vp[3], _vp[4], _vp[5]);
+    if (_hasSC) nvmtl_vk_cmd_set_scissor(&_cb->_c, (int32_t)_sc[0], (int32_t)_sc[1], _sc[2], _sc[3]);
+    [self nvmtlApplyDepthStencil];
+    if (vis) { _visPending = YES; [self nvmtlBeginVisibility]; }
+    if (cr) { static _Atomic unsigned said; if (atomic_fetch_add(&said, 1) < 4) nvlog("encoder: N-81 fetch copy failed - the draw is skipped"); return NO; }
+    return YES;
+}
 - (BOOL)nvmtlFetchRestart:(nvk_pipeline *)p {
     static _Atomic unsigned told;
     if (atomic_fetch_add(&told, 1) < 4) nvlog("encoder: I-048 render pass resumed as a %s pass for the next pipeline",
@@ -2692,6 +2712,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
     }
     if(!_cb->_resources)_cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:selected];
     if(_cb->_c.in_rp && _cb->_c.rp_fetch!=selected->_p.rp_fetch && ![self nvmtlFetchRestart:&selected->_p]) return NO;   // NvGfx (I-048)
+    if(_cb->_c.in_rp && selected->_p.fetch_copy && ![self nvmtlFetchCopy:&selected->_p]) return NO;   // NvGfx (N-81)
     nvmtl_vk_cmd_bind_pipeline(&_cb->_c,&selected->_p);
     nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_descriptor.vertexFunction,   _vbufAt);
     nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_descriptor.fragmentFunction, _fbufAt);
