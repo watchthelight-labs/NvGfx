@@ -2957,16 +2957,99 @@ static int nvmtl_fbfetch_on(void)
     }
     return on;
 }
+/*
+ * NvGfx (I-048): upstream 2.1.0 turned every render pass of every app (WindowServer excepted) into a framebuffer-fetch
+ * pass: colour references in GENERAL layout, the colour attachments also listed as input attachments, and a third,
+ * by-region self-dependency. Terminal and other apps then drew new text over old without clearing (2.0.4 was clean).
+ * Here only a pipeline whose fragment shader reads the framebuffer (fetch_mask != 0: an input attachment at set 3,
+ * binding 192+n, which the translator emits only for [[color(n)]] reads) gets those render passes; every other pipeline
+ * gets the 2.0.4 pass (COLOR_ATTACHMENT_OPTIMAL, no input attachments, two dependencies). The two kinds are not
+ * render-pass compatible, so when an encoder switches between them the pass is ended and resumed with every attachment
+ * loaded (NVMTLObjects.m, nvmtlFetchRestart). Image usage keeps the 2.1.0 input-attachment bit, because an image is
+ * made before anyone knows whether a fetching pipeline will draw into it.
+ * NVMTL_NVGFX_LEGACY_FBFETCH=1 restores the 2.1.0 behaviour (every pass a fetch pass) for A/B tests.
+ */
+static int nvmtl_fbfetch_legacy(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_NVGFX_LEGACY_FBFETCH");
+        on = e && e[0] == '1';
+        if (on) nvlog("vk: NVMTL_NVGFX_LEGACY_FBFETCH=1 - every render pass declares input attachments (upstream 2.1.0)");
+    }
+    return on;
+}
+/* does this pipeline's render pass declare its colour attachments as input attachments (a fetch pass)? */
+static int nvmtl_rp_fetch(const nvk_pipeline *p, uint32_t ncol)
+{
+    return nvmtl_fbfetch_on() && ncol && (p->fetch_mask || nvmtl_fbfetch_legacy());
+}
 #define NVMTL_STENCIL_EMU_OFFSET 160u   /* the translator's native::stencil_export::STENCIL_EXPORT_PUSH_OFFSET */
-/* the translator's stencil-export lowering: a push-constant block member at offset 160 (stencil emulation, see NVMTL_SEMU_DRAW) */
+/*
+ * The translator's stencil-export lowering (translator/src/native/stencil_export.rs) emits exactly this, and only when
+ * the fragment shader had a FragStencilRefEXT output and no push constants of its own:
+ *   %S = OpTypeStruct %uint          (one member, a 32-bit unsigned int)
+ *   OpDecorate %S Block
+ *   OpMemberDecorate %S 0 Offset 160
+ *   %P = OpTypePointer PushConstant %S
+ *   %v = OpVariable %P PushConstant
+ * Upstream 2.1.0 accepted any OpMemberDecorate .. Offset 160, so every shader with a uniform or storage struct larger than
+ * 160 bytes was treated as stencil-emulated, and its draws ran with stencil reference 0 plus one replay per write-mask
+ * bit (I-048). NvGfx checks the whole signature above. NVMTL_NVGFX_LEGACY_SEMU=1 restores the 2.1.0 test for A/B runs.
+ */
+static int nvmtl_semu_legacy(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_NVGFX_LEGACY_SEMU");
+        on = e && e[0] == '1';
+        if (on) nvlog("vk: NVMTL_NVGFX_LEGACY_SEMU=1 - any struct member at offset 160 marks a stencil-export shader (upstream 2.1.0)");
+    }
+    return on;
+}
+/* the instruction that defines id `id` (its result id is word 1, or word 2 for instructions with a result type) */
+static const uint32_t *nvmtl_spirv_def(const uint32_t *w, size_t nw, uint32_t op, size_t res_word, uint32_t id)
+{
+    for (size_t i = 5; i < nw; ) {
+        uint32_t wc = w[i] >> 16, o = w[i] & 0xffffu;
+        if (!wc || i + wc > nw) break;
+        if (o == op && wc > res_word && w[i + res_word] == id) return w + i;
+        i += wc;
+    }
+    return NULL;
+}
+static int nvmtl_spirv_semu_block(const uint32_t *w, size_t nw, uint32_t st)
+{
+    // %S = OpTypeStruct %uint (one member) and %uint = OpTypeInt 32 0
+    const uint32_t *ts = nvmtl_spirv_def(w, nw, 30, 1, st);
+    if (!ts || (ts[0] >> 16) != 3) return 0;
+    const uint32_t *ti = nvmtl_spirv_def(w, nw, 21, 1, ts[2]);
+    if (!ti || (ti[0] >> 16) != 4 || ti[2] != 32 || ti[3] != 0) return 0;
+    int block = 0, var = 0;
+    for (size_t i = 5; i < nw; ) {
+        uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (!wc || i + wc > nw) break;
+        if (op == 71 && wc == 3 && w[i + 1] == st && w[i + 2] == 2) block = 1;                       // OpDecorate %S Block
+        if (op == 59 && wc >= 4 && w[i + 3] == 9) {                                                  // OpVariable .. PushConstant
+            const uint32_t *tp = nvmtl_spirv_def(w, nw, 32, 1, w[i + 1]);                            // OpTypePointer PushConstant %S
+            if (tp && (tp[0] >> 16) == 4 && tp[2] == 9 && tp[3] == st) var = 1;
+        }
+        i += wc;
+    }
+    return block && var;
+}
 uint32_t nvmtl_spirv_stencil_emu(const void *code, size_t bytes)
 {
     const uint32_t *w = (const uint32_t *)code; const size_t nw = bytes / 4;
     if (nw < 5 || w[0] != 0x07230203u) return 0;
+    const int legacy = nvmtl_semu_legacy();
     for (size_t i = 5; i < nw; ) {
         uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
         if (!wc || i + wc > nw) break;
-        if (op == 72 && wc == 5 && w[i + 3] == 35 && w[i + 4] == 160u) return 1;   // OpMemberDecorate .. Offset 160
+        if (op == 72 && wc == 5 && w[i + 3] == 35 && w[i + 4] == NVMTL_STENCIL_EMU_OFFSET) {        // OpMemberDecorate .. Offset 160
+            if (legacy) return 1;
+            if (w[i + 2] == 0 && nvmtl_spirv_semu_block(w, nw, w[i + 1])) return 1;
+        }
         i += wc;
     }
     return 0;
@@ -3048,6 +3131,9 @@ void nvmtl_vk_cmd_bind_set(nvk_cmdbuf *c, nvk_pipeline *p)
     c->semu_layout = p->stencil_emu ? p->layout : NULL;
     if (p->skip_draws) { c->nobind = 1; return; }
     if (p->fetch_mask && c->in_rp) {
+        // NvGfx (I-048): only a fetch pass has the input attachments and the self-dependency this read needs; the encoder
+        // resumes the pass as one before such a draw (nvmtlFetchRestart), so this is a safety net, not a path
+        if (!c->rp_fetch) { static int said; if (said++ < 4) nvlog("vk: a framebuffer-fetch pipeline in a pass without input attachments - this draw is skipped"); c->nobind = 1; return; }
         VkDescriptorSet fs = nvmtl_fetch_set(c, p->fetch_mask);
         if (!fs) { static int said; if (said++ < 4) nvlog("vk: framebuffer fetch set could not be made (mask 0x%x) - this draw is skipped", p->fetch_mask); c->nobind = 1; return; }
         pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)p->layout, NVMTL_FETCH_SET, 1, &fs, 0, NULL);
@@ -3358,9 +3444,9 @@ static VkResult nvmtl_make_render_pass(const nvk_pipeline *p, uint32_t load, VkR
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL };
     }
     // framebuffer fetch: the colour attachments are input attachments of the same subpass, in GENERAL layout (the feedback
-    // loop Vulkan allows), and every pass declares them so every pipeline of the pass stays compatible
+    // loop Vulkan allows). NvGfx (I-048): only for a pipeline that reads them (nvmtl_rp_fetch); others keep the 2.0.4 pass
     VkAttachmentReference iref[NVMTL_NCOL];
-    const int fetch = nvmtl_fbfetch_on() && ncol;
+    const int fetch = nvmtl_rp_fetch(p, ncol);
     for (uint32_t i = 0; fetch && i < ncol; i++) {
         if (cref[i].attachment != VK_ATTACHMENT_UNUSED) cref[i].layout = VK_IMAGE_LAYOUT_GENERAL;
         iref[i] = (VkAttachmentReference){ cref[i].attachment, VK_IMAGE_LAYOUT_GENERAL };
@@ -3853,6 +3939,9 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     nvmtl_spirv_texel_mask(vs, vn, out->tbm[0]); nvmtl_spirv_texel_mask(fs, fn, out->tbm[1]);
     out->tbany = 0; for (int k = 0; k < 4; k++) out->tbany |= (out->tbm[0][k] | out->tbm[1][k]) != 0;
     (void)vkfmt;
+    // NvGfx (I-048): the fetch mask decides the render pass kind (nvmtl_rp_fetch), so it is known before the pass is made
+    out->fetch_mask = nvmtl_fbfetch_on() ? nvmtl_spirv_fetch_mask(fs, fn) : 0;
+    { uint32_t cf_[NVMTL_NCOL], rm_; out->rp_fetch = (uint32_t)nvmtl_rp_fetch(out, nvmtl_rt_shape(out, cf_, &rm_)); }
     VkRenderPass pass = VK_NULL_HANDLE;
     VKCK(nvmtl_make_render_pass(out, 0, &pass), "vkCreateRenderPass");
     out->rp = pass;
@@ -3887,7 +3976,6 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     if (ensure_descriptors()) goto pipeline_failed;
     VkDescriptorSetLayout sl2[4] = { g_setLayout, g_setLayout, g_heapLayout, VK_NULL_HANDLE };
     uint32_t nsl = g_heapSet ? 3 : 2;
-    out->fetch_mask = nvmtl_fbfetch_on() ? nvmtl_spirv_fetch_mask(fs, fn) : 0;
     if (out->fetch_mask) {
         pthread_mutex_lock(&g_desc_lock); const int fl = nvmtl_fetch_layouts_locked(); pthread_mutex_unlock(&g_desc_lock);
         if (fl) { nvlog("vk: framebuffer fetch layouts could not be made - pipeline refused"); return -1; }
@@ -4720,6 +4808,7 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
       } }
     pvkCmdBeginRenderPass(c->cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     c->in_rp = 1;
+    c->rp_fetch = (uint32_t)nvmtl_rp_fetch(p, ncol);   // NvGfx (I-048): which kind of pass is open (nvmtlFetchRestart)
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) c->fetchview[i] = (i < ncol && cf[i]) ? ps->colview[i] : NULL;
     if (p->pipe) pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipe);
     VkViewport vp = { 0, (float)ps->h, (float)ps->w, -(float)ps->h, 0, 1 }; VkRect2D sc = { { 0, 0 }, { ps->w, ps->h } };
@@ -4896,7 +4985,7 @@ static VkResult nvmtl_make_render_pass_shape(const nvk_pipeline *p, uint32_t loa
     }
     VkSubpassDescriptionDepthStencilResolve dsr = { VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE, NULL, dm, sm, &drref };
     VkAttachmentReference2 iref2[NVMTL_NCOL];
-    const int fetch = nvmtl_fbfetch_on() && ncol;
+    const int fetch = nvmtl_rp_fetch(p, ncol);   // NvGfx (I-048): as nvmtl_make_render_pass
     for (uint32_t i = 0; fetch && i < ncol; i++) {
         if (cref[i].attachment != VK_ATTACHMENT_UNUSED) cref[i].layout = VK_IMAGE_LAYOUT_GENERAL;
         iref2[i] = (VkAttachmentReference2){ VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, NULL, cref[i].attachment, VK_IMAGE_LAYOUT_GENERAL,
