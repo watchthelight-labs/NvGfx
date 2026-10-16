@@ -2955,6 +2955,11 @@ static int nvmtl_fbfetch_on(void)
         const char *off = getenv("NVMTL_NO_FBFETCH"), *ws = getenv("NVMTL_FBFETCH_WS");
         const int is_ws = getprogname() && !strcmp(getprogname(), "WindowServer");
         on = !(off && off[0] == '1') && (!is_ws || (ws && ws[0] == '1'));
+        // NvGfx (N-80): boot-arg nvgfxwsfetch=1 turns framebuffer fetch on in WindowServer alone, whatever the conf says.
+        // CoreAnimation's composite (fixed_frag_lpf_cpf) reads its colour attachments; without fetch those reads hit unbound
+        // input attachments. A boot-arg, not a conf line, so booting without it (the USB stick) is the rollback.
+        if (is_ws) { char ba[1024] = { 0 }; size_t n = sizeof ba - 1;
+            if (sysctlbyname("kern.bootargs", ba, &n, NULL, 0) == 0 && strstr(ba, "nvgfxwsfetch=1")) on = 1; }
         nvlog("vk: framebuffer fetch %s", on ? "ON - render passes declare their colour attachments as input attachments"
                                            : is_ws ? "off in WindowServer (NVMTL_FBFETCH_WS=1 opts in)" : "OFF (NVMTL_NO_FBFETCH=1)");
     }
