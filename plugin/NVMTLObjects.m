@@ -2617,15 +2617,18 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
 }
 static const void *NVGFX_FTEX_KEY = &NVGFX_FTEX_KEY;
 static const void *NVGFX_FSAMP_KEY = &NVGFX_FSAMP_KEY;
-static const void *NVGFX_CAP_KEY = &NVGFX_CAP_KEY;   // set when the next draw call should be logged (N-83 capture)
+static const void *NVGFX_CAP_KEY = &NVGFX_CAP_KEY;
+static const void *NVGFX_FTOBJ_KEY = &NVGFX_FTOBJ_KEY;   // bound fragment textures (objects), for the N-83 capture   // set when the next draw call should be logged (N-83 capture)
 // N-83: hex dump of a CPU-visible bound buffer, 96 bytes per syslog line
 static void nvgfx_cap_hex(const char *tag, NSDictionary *at, unsigned idx, size_t want)
 {
     NSArray *e = at[@(idx)]; if (!e) return;
     NVMTLBuffer *nb = e[0]; size_t off = [e[1] unsignedLongValue];
-    if (!nb->_b.map) { nvgfx_wstrace("CAP %s[%u] off %zu len %zu not CPU-visible", tag, idx, off, nb->_b.size); return; }
+    // the same pointer -contents returns: the managed shadow, a host pointer, or the mapped buffer
+    const void *base = nb->_shadow.map ? nb->_shadow.map : (nb->_hostPtr ? nb->_hostPtr : nb->_b.map);
+    if (!base) { nvgfx_wstrace("CAP %s[%u] off %zu len %zu not CPU-visible", tag, idx, off, nb->_b.size); return; }
     size_t len = nb->_b.size > off ? nb->_b.size - off : 0; if (len > want) len = want;
-    const uint8_t *p = (const uint8_t *)nb->_b.map + off;
+    const uint8_t *p = (const uint8_t *)base + off;
     for (size_t o = 0; o < len; o += 96) {
         char hx[200]; size_t k = 0;
         for (size_t j = o; j < len && j < o + 96; j++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", p[j]);
@@ -2651,14 +2654,46 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                           [[[ft description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String],
                           fj ? [[NSString alloc] initWithData:fj encoding:NSUTF8StringEncoding].UTF8String : "-",
                           _ps->_vdesc.UTF8String ?: "-");
-            static _Atomic unsigned ncap;
-            if (atomic_fetch_add(&ncap, 1) < 6) {   // N-83: everything needed to replay this draw offline
+            // N-84: up to 3 captures per (target size, slot-3 size) so the menu bar cannot use up the budget
+            static NSMutableDictionary *capn; static pthread_mutex_t capmu = PTHREAD_MUTEX_INITIALIZER;
+            NSString *ck = [NSString stringWithFormat:@"%ux%u/%@", _target ? [_target nvi]->w : 0u, _target ? [_target nvi]->h : 0u, ft[@"3"] ?: @"-"];
+            pthread_mutex_lock(&capmu); if (!capn) capn = [NSMutableDictionary new];
+            NSUInteger cn = [capn[ck] unsignedIntegerValue]; capn[ck] = @(cn + 1); pthread_mutex_unlock(&capmu);
+            if (cn < 3) {   // N-83: everything needed to replay this draw offline
                 NSDictionary *fsd = objc_getAssociatedObject(self, NVGFX_FSAMP_KEY);
                 nvgfx_wstrace("CAP begin fs %s target %ux%u fmt %u samplers %s", _ps->_fname.UTF8String, _target ? [_target nvi]->w : 0u,
                               _target ? [_target nvi]->h : 0u, _target ? [_target nvi]->fmt : 0u,
                               fsd ? [[[fsd description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String] : "-");
+                {   // the live function constants of this pipeline's fragment function
+                    id ffn = _ps->_descriptor.fragmentFunction; NSDictionary *fc = [ffn isKindOfClass:[NVMTLFunction class]] ? ((NVMTLFunction *)ffn)->_fc : nil;
+                    NSData *fj2 = fc ? [NSJSONSerialization dataWithJSONObject:fc options:NSJSONWritingSortedKeys error:NULL] : nil;
+                    NSString *fs2 = fj2 ? [[NSString alloc] initWithData:fj2 encoding:NSUTF8StringEncoding] : @"-";
+                    for (NSUInteger o = 0; o < fs2.length; o += 600)
+                        nvgfx_wstrace("CAP FC +%lu: %s", (unsigned long)o, [fs2 substringWithRange:NSMakeRange(o, MIN((NSUInteger)600, fs2.length - o))].UTF8String);
+                }
+                {   // the small source texture at slot 3, once per capture key (BGRA8 only, at most 256x64)
+                    NSDictionary *fo3 = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY); id<MTLTexture> st = fo3[@3];
+                    if (st && st.pixelFormat == MTLPixelFormatBGRA8Unorm && st.width <= 256 && st.height <= 64 && cn == 0) {
+                        size_t W = st.width, H = st.height; uint8_t *px = (uint8_t *)calloc(W * H, 4);
+                        if (px) { [st getBytes:px bytesPerRow:W * 4 fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+                            for (size_t r = 0; r < H; r++) for (size_t c0 = 0; c0 < W; c0 += 48) { char hx[400]; size_t k = 0;
+                                for (size_t c = c0; c < W && c < c0 + 48; c++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x%02x%02x", px[(r * W + c) * 4 + 2], px[(r * W + c) * 4 + 1], px[(r * W + c) * 4]);
+                                nvgfx_wstrace("CAP SRC3 %zux%zu row %zu col %zu (RGB): %s", W, H, r, c0, hx); }
+                            free(px); }
+                    }
+                }
                 for (unsigned i = 0; i <= 8; i++) nvgfx_cap_hex("FBUF", _fbufAt, i, 512);
                 for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("VBUF", _vbufAt, i, 480);
+                static _Atomic int noise_done;   // the 32x32 noise texture, once: its period matches the 32 px tiles
+                NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
+                id<MTLTexture> nt = fo[@9];
+                if (nt && nt.width == 32 && nt.height == 32 && nt.pixelFormat == MTLPixelFormatBGRA8Unorm && !atomic_exchange(&noise_done, 1)) {
+                    uint8_t px[32 * 32 * 4]; memset(px, 0, sizeof px);
+                    [nt getBytes:px bytesPerRow:128 fromRegion:MTLRegionMake2D(0, 0, 32, 32) mipmapLevel:0];
+                    for (int r = 0; r < 32; r++) { char hx[300]; size_t k = 0;
+                        for (int c = 0; c < 32; c++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x%02x", px[(r * 32 + c) * 4 + 2], px[(r * 32 + c) * 4 + 3]);
+                        nvgfx_wstrace("CAP NOISE row %d (R,A per texel): %s", r, hx); }
+                }
                 objc_setAssociatedObject(self, NVGFX_CAP_KEY, @1, OBJC_ASSOCIATION_RETAIN);
             }
         }
@@ -3045,6 +3080,9 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
         if (!ft) { ft = [NSMutableDictionary new]; objc_setAssociatedObject(self, NVGFX_FTEX_KEY, ft, OBJC_ASSOCIATION_RETAIN); }
         ft[[@(i) stringValue]] = [NSString stringWithFormat:@"%lux%lu fmt %lu mips %lu base %lu type %lu", (unsigned long)t.width, (unsigned long)t.height,
                                   (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, (unsigned long)t.parentRelativeLevel, (unsigned long)t.textureType];
+        NSMutableDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
+        if (!fo) { fo = [NSMutableDictionary new]; objc_setAssociatedObject(self, NVGFX_FTOBJ_KEY, fo, OBJC_ASSOCIATION_RETAIN); }
+        fo[@(i)] = t;
     }
     nvmtl_retain_resource(_cb, nt);
     nvmtl_surface_cpu_dump(nt->_parent ? nt->_parent : nt);
@@ -3333,7 +3371,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (![self nvmtlBindSamplerPipeline]) return;
     if (nvgfx_wstrace_on() && objc_getAssociatedObject(self, NVGFX_CAP_KEY)) {   // N-83 capture: the draw call itself
         objc_setAssociatedObject(self, NVGFX_CAP_KEY, nil, OBJC_ASSOCIATION_RETAIN);
-        char ix[200]; size_t k = 0; const uint8_t *ip = b->_b.map ? (const uint8_t *)b->_b.map + off : NULL;
+        char ix[200]; size_t k = 0; const void *ib_ = b->_shadow.map ? b->_shadow.map : (b->_hostPtr ? b->_hostPtr : b->_b.map);
+        const uint8_t *ip = ib_ ? (const uint8_t *)ib_ + off : NULL;
         for (unsigned j = 0; ip && j < 24 && j < count; j++)
             k += (size_t)snprintf(ix + k, sizeof ix - k, "%u ", it == MTLIndexTypeUInt16 ? ((const uint16_t *)ip)[j] : ((const uint32_t *)ip)[j]);
         ix[k < sizeof ix ? k : sizeof ix - 1] = 0;
