@@ -51,6 +51,7 @@ extern "C" {
 }
 #include <libkern/OSAtomic.h>
 #include "nvrm_vram_abi.h"
+#include "nvgfx_present_abi.h"
 
 // Surfaces may use half of a resizable BAR1 (>= 4 GB) and three quarters of a smaller one. WAS: a fixed 192 MB below
 // 4 GB, which is 3/4 of the 256 MB firmware window but left a 512 MB or 1 GB BAR1 no better off (issue #27).
@@ -323,11 +324,32 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     unsigned    fFlipCacheN = 0, fFlipCount = 0, fFlipRejects = 0, fFlipEvict = 0;
     struct NvKmsKapiSurface *fFrontSurf = nullptr;
     static inline volatile SInt32 sFlipLatched[8] = {};
+    // NvGfx present path (nvgfx_present_abi.h). flipAsync commits a pure flip and returns; the flip is then
+    // "pending" here until the newest completion slot of the head's primary layer reads BEGUN or FINISHED, which
+    // presentPoll checks from the KAPI flip event, the vblank thread call and the fallback timer. fPresentLock
+    // guards this state, the flip cache's victim choice and every commit on this head; it is never held across a
+    // wait or sleep and never taken under NVKMS's own lock (see the locking notes at flipAsync).
+    IORecursiveLock *fPresentLock = nullptr;
+    struct NvKmsKapiSurface *fPendSurf = nullptr;   // committed by flipAsync, not yet seen latched
+    UInt64 fPendToken = 0;                           // its caller's token, reported through fPresHook
+    uint64_t fPendT0 = 0;                            // mach_absolute_time of its commit
+    bool fPendDead = false;                          // it timed out: kept out of the cache's reach, never reported again
+    unsigned fPresentHold = 0;                       // a legacy commit is between its pre-wait and its commit: flipAsync says busy
+    nvgfx_present_hook_t fPresHook = nullptr; void *fPresRef = nullptr;
+    static inline NVRMNVDAFramebuffer *volatile sPresentFb[8] = {};   // head -> framebuffer with async flips, for eventCallback
+    volatile uint64_t fHwVblStamp = 0;               // the NVKMS vblank timestamp of the last hardware vblank (ns, NVKMS's clock)
+    IOReturn flipAsync(struct NVGfxFlipSubmit *req);
+    struct NvKmsKapiSurface *flipCacheFind(struct NvKmsKapiMemory *mem, unsigned w, unsigned h, unsigned pitch, UInt64 cookie, UInt64 epoch);
+    struct NvKmsKapiSurface *flipCacheCreate(struct NvKmsKapiMemory *mem, unsigned w, unsigned h, unsigned pitch, UInt64 cookie, UInt64 epoch);
+    bool presentPollLocked(UInt64 *token, int *status);
+    void presentRetireLocked(int status, UInt64 *token, int *statusOut);
+    void presentPoll();
+    void presentNotify(UInt64 token, int status);
     bool flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, unsigned h, unsigned pitch, int *rcOut, bool pure = false, UInt64 cookie = 0);
     bool fSubmissionSeen = false, fSubmissionFaulted = false;
     unsigned fRejected = 0;     // commits NVKMS refused on this head, for NVRMRejectedCommits
     NvBool submitConfig(struct NvKmsKapiRequestedModeSetConfig *cfg, struct NvKmsKapiModeSetReplyConfig *rep, NvBool commit,
-                        bool bootstrap = false, bool cursorOnly = false);
+                        bool bootstrap = false, bool cursorOnly = false, bool async = false);
     thread_call_t fReflip = nullptr;
     unsigned fReflips = 0; int fReflipRc = -99;
     unsigned fVblReg = 0;
@@ -368,8 +390,13 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
         if (event->type == NVKMS_EVENT_TYPE_DPY_CHANGED || event->type == NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED)
             FBLOG("kapi event type %d (display change)", (int)event->type);
         if (event->type == NVKMS_EVENT_TYPE_FLIP_OCCURRED && event->u.flipOccurred.head < 8
-            && event->u.flipOccurred.layer == NVKMS_KAPI_LAYER_PRIMARY_IDX)
+            && event->u.flipOccurred.layer == NVKMS_KAPI_LAYER_PRIMARY_IDX) {
             OSIncrementAtomic(&sFlipLatched[event->u.flipOccurred.head]);
+            // NvGfx: the earliest sign that an async flip latched. This runs on NVRM's KAPI event thread call with
+            // NVKMS's lock released (os-nvkms-xnu.cpp kms_kapi_event_fire), so presentPoll may take fPresentLock here.
+            NVRMNVDAFramebuffer *fb = sPresentFb[event->u.flipOccurred.head];
+            if (fb && fb->fPendSurf && !OSAddAtomic(0, &fb->fStopping)) fb->presentPoll();
+        }
         // A display connected (or a connector changed) after boot: look for it off this context, after a short
         // settle (EDID reads follow the hot-plug interrupt).
         if (event->type == NVKMS_EVENT_TYPE_DPY_CHANGED || event->type == NVKMS_EVENT_TYPE_DYNAMIC_DPY_CONNECTED)
@@ -1359,19 +1386,38 @@ static IORecursiveLock *startLock()
 // path takes, which is what an on-machine flicker check reads.
 static int gFlipLatch = 1;
 static int gFlipLatchWaits = 0, gFlipLatchTimeouts = 0, gFlipLatchMaxUs = 0;
+// NvGfx present path counters (debug.nvgfx_fb_*), registered with the others below.
+static SInt64 gPresSubmits, gPresBusy, gPresLatched, gPresSuperseded, gPresTimeouts, gPresRefused, gPresHold;
+static SInt64 gPresLatchUsSum, gPresCommitUsSum, gVblHopUsSum, gVblHopN;
+static int gPresLatchUsMax, gPresCommitUsMax, gVblHopUsMax;
+static const unsigned kPresLatchTimeoutMs = 100;   // the legacy latch wait's bound (100 x IOSleep(1))
+// Holds async flips off a head while a legacy commit waits for the previous flip and commits its own: without it a
+// steady stream of async flips could keep the head's newest slot pending through the whole pre-wait and fault it.
+struct NVRMPresentHold {
+    unsigned *count; IORecursiveLock *lock;
+    NVRMPresentHold(IORecursiveLock *l, unsigned *c) : count(c), lock(l)
+        { if (lock) { IORecursiveLockLock(lock); ++*count; IORecursiveLockUnlock(lock); } }
+    ~NVRMPresentHold() { if (lock) { IORecursiveLockLock(lock); --*count; IORecursiveLockUnlock(lock); } }
+};
 NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig *cfg,
                                             struct NvKmsKapiModeSetReplyConfig *rep, NvBool commit, bool bootstrap,
-                                            bool cursorOnly)
+                                            bool cursorOnly, bool async)
 {
     if (!fKms || !fDev || !cfg || !rep || fHead >= 8 || fSubmissionFaulted) return NV_FALSE;
     if (!commit) return fKms->applyModeSetConfig(fDev, cfg, rep, NV_FALSE);
     // A cursor-only request leaves the primary layer alone: KAPI does not advance the primary layer's completion slot
     // for it, so there is no primary flip to wait for and the primary tracking below stays as the last present left it.
+    // NvGfx: every commit on this head goes through fPresentLock so an async flip and a cursor, gamma or mode commit
+    // never run KAPI's per-head bookkeeping at the same time. The lock covers the commit call only, never a wait.
     if (cursorOnly) {
+        if (fPresentLock) IORecursiveLockLock(fPresentLock);
         const NvBool ok = fKms->applyModeSetConfig(fDev, cfg, rep, NV_TRUE);
+        if (fPresentLock) IORecursiveLockUnlock(fPresentLock);
         return ok && rep->flipResult == NV_KMS_FLIP_RESULT_SUCCESS;
     }
-    if (fSubmissionSeen) {
+    // A legacy commit (mode set, home flip, wake re-flip, head on/off) keeps async flips off the head until it is done.
+    NVRMPresentHold hold(async ? nullptr : fPresentLock, &fPresentHold);
+    if (fSubmissionSeen && !async) {
         // Initial console acceptance is asynchronous. A still-pending prior flip
         // must receive the same bounded completion wait as a newly committed flip.
         bool complete = false;
@@ -1388,7 +1434,14 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
     }
     const bool tracked = cfg->headRequestedConfig[fHead].modeSetConfig.bActive &&
         cfg->headRequestedConfig[fHead].layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX].config.surface;
+    UInt64 doneToken = 0; int doneStatus = 0;
+    if (fPresentLock) IORecursiveLockLock(fPresentLock);
+    // The pre-wait above proved the newest flip latched, so an async flip still recorded as pending is on the panel:
+    // report it before this commit replaces it, so its transaction cannot wait for an event that will never come.
+    if (!async && fPendSurf && !fPendDead) presentRetireLocked(NVGFX_PRESENT_SUPERSEDED, &doneToken, &doneStatus);
     const NvBool accepted = fKms->applyModeSetConfig(fDev, cfg, rep, NV_TRUE);
+    if (fPresentLock) IORecursiveLockUnlock(fPresentLock);
+    if (doneToken) presentNotify(doneToken, doneStatus);
     if (!accepted || rep->flipResult != NV_KMS_FLIP_RESULT_SUCCESS) {
         // A rejected request queued nothing (INVALID_PARAMS fails validation, IN_PROGRESS refuses before queuing), so
         // no surface is in flight and this call alone fails. Latching here turned one refused 8x8 cursor image at
@@ -1419,7 +1472,8 @@ NvBool NVRMNVDAFramebuffer::submitConfig(struct NvKmsKapiRequestedModeSetConfig 
     if (!tracked) { fSubmissionSeen = false; return NV_TRUE; }
     fSubmissionSeen = true;
     // Initial acceptance permits console handoff, never surface retirement. The owned boot surface remains pinned.
-    if (bootstrap || !gFlipLatch) return NV_TRUE;
+    // An async flip returns here too: its completion is found by presentPoll, not waited for.
+    if (bootstrap || !gFlipLatch || async) return NV_TRUE;
     OSIncrementAtomic((volatile SInt32 *)&gFlipLatchWaits);
     const uint64_t latch0 = mach_absolute_time();
     for (unsigned i = 0; i < 100; ++i) {
@@ -1799,10 +1853,16 @@ uint64_t NVRMNVDAFramebuffer::vblPeriodAbs()
     }
     uint64_t abs = 0; nanoseconds_to_absolutetime(ns, &abs); return abs;
 }
-void NVRMNVDAFramebuffer::hwVblIntr(NvU64 param, NvU64)
+// Runs inside NVKMS's timer worker with NVKMS's lock held (os-nvkms-xnu.cpp kms_timer_execute -> RgVBlankDeferredWork).
+// The VBL proc is NOT called from here: IOFramebuffer's handler can move the hardware cursor, and our cursor commit
+// goes back into NVKMS, which would deadlock on that lock. The proc takes no timestamp argument anyway (IOFBInterruptProc
+// is (target, ref)), so the hardware timestamp is recorded for the hop statistics and the delivery stays one thread
+// call away. fPresentLock is not taken here either (see flipAsync's locking notes); hwVblDeliver polls the async flip.
+void NVRMNVDAFramebuffer::hwVblIntr(NvU64 param, NvU64 timestamp)
 {
     NVRMNVDAFramebuffer *me = (NVRMNVDAFramebuffer *)(uintptr_t)param;
     uint64_t now = 0; clock_get_uptime(&now); me->fHwVblLast = now;
+    me->fHwVblStamp = timestamp;
     me->scheduleCall(me->fHwVblCall, 0);
 }
 void NVRMNVDAFramebuffer::hwVblDeliver(thread_call_param_t p0, thread_call_param_t)
@@ -1812,6 +1872,14 @@ void NVRMNVDAFramebuffer::hwVblDeliver(thread_call_param_t p0, thread_call_param
     if (OSAddAtomic(0, &me->fStopping)) return;
     if (!me->fHwVblCb) return;
     if (me->fVbl.proc) { me->fVbl.proc(me->fVbl.target, me->fVbl.ref); me->fVblCalls++; }
+    {   // NvGfx: how late the VBL reaches IOFramebuffer after NVKMS's vblank callback (the thread call hop)
+        uint64_t now = 0, ns = 0; clock_get_uptime(&now);
+        const uint64_t at = me->fHwVblLast;
+        if (at && now >= at) { absolutetime_to_nanoseconds(now - at, &ns); const int us = (int)(ns / 1000);
+            OSAddAtomic64(us, &gVblHopUsSum); OSAddAtomic64(1, &gVblHopN); if (us > gVblHopUsMax) gVblHopUsMax = us; } }
+    // NvGfx: the flip programmed before this vblank has latched by now unless it missed it; this also covers a lost
+    // flip event. The KAPI event usually gets there first.
+    if (me->fPendSurf) me->presentPoll();
     if (++me->fHwVblCalls == 1) FBLOG("hw vblank: first VBL from head %u's real vblank (period %llu abs)", me->fHead, me->vblPeriodAbs());
 }
 void NVRMNVDAFramebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
@@ -1836,6 +1904,8 @@ void NVRMNVDAFramebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
     {   uint64_t nowv = 0; clock_get_uptime(&nowv); const uint64_t per = me->vblPeriodAbs();
         const bool hwLive = me->fHwVblLast && nowv - me->fHwVblLast < 2 * per;
         if (!hwLive && me->fVbl.proc) { me->fVbl.proc(me->fVbl.target, me->fVbl.ref); me->fVblCalls++; } }
+    // NvGfx: the fallback poll for an async flip, and the place its 100 ms timeout is noticed when nothing else runs.
+    if (me->fPendSurf) me->presentPoll();
     uint64_t period = 0, now = 0;
     period = me->vblPeriodAbs();
     clock_get_uptime(&now);
@@ -1969,6 +2039,8 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
     }
     fFlipCacheLock = IOSimpleLockAlloc();
     if (!fFlipCacheLock) return false;
+    fPresentLock = IORecursiveLockAlloc();
+    if (!fPresentLock) return false;
     fKms = (struct NvKmsKapiFunctionsTable *)(uintptr_t)propU64(provider, "nvkms-kapi");
     fGpuId = (NvU32)propU64(provider, "gpu-id");
     fIndex = (unsigned)propU64(provider, "fb-index");
@@ -2069,6 +2141,17 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
     if (fHwVblCb && fKms && fDev) {
         fKms->unregisterVblankIntrCallback(fDev, fHead, fHwVblCb); fHwVblCb = nullptr;
     }
+    // NvGfx: no more flip events to this instance, and no more hook calls into NVAccel.
+    for (unsigned h = 0; h < 8; ++h)
+        if (sPresentFb[h] == this) OSCompareAndSwapPtr(this, nullptr, (void *volatile *)&sPresentFb[h]);
+    if (fPresentLock) {
+        UInt64 tok = 0; int stt = 0;
+        IORecursiveLockLock(fPresentLock);
+        if (fPendSurf && !fPendDead) presentRetireLocked(NVGFX_PRESENT_SUPERSEDED, &tok, &stt);
+        IORecursiveLockUnlock(fPresentLock);
+        if (tok) presentNotify(tok, stt);
+        IORecursiveLockLock(fPresentLock); fPresHook = nullptr; fPresRef = nullptr; IORecursiveLockUnlock(fPresentLock);
+    }
     if (fIndex < sizeof gFBs / sizeof gFBs[0]) {
         IORecursiveLock *sl = startLock();
         if (sl) IORecursiveLockLock(sl);
@@ -2128,6 +2211,7 @@ IOReturn NVRMNVDAFramebuffer::getAppleSense(IOIndex connectIndex, UInt32 *senseT
 void NVRMNVDAFramebuffer::free()
 {
     if (fFlipCacheLock) { IOSimpleLockFree(fFlipCacheLock); fFlipCacheLock = nullptr; }
+    if (fPresentLock) { IORecursiveLockFree(fPresentLock); fPresentLock = nullptr; }
     if (fLogoKeep) { IODelete(fLogoKeep, uint32_t, (size_t)fLogoW * fLogoH); fLogoKeep = nullptr; }
     super::free();
 }
@@ -2708,6 +2792,21 @@ SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_interval, CTLFLAG_RW | CTLFLAG_LOCKED, 
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_flip_us_sum, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gFlipUsSum, "microseconds spent in pure-flip applyModeSetConfig");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_flip_n, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gFlipN, "pure flips timed");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_flip_us_max, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gFlipUsMax, "the slowest pure flip, us");
+// NvGfx present path (flipAsync). The depth switch itself is NVAccel's debug.nvgfx_present_depth.
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_submits,    CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gPresSubmits,    "async flips committed (not waited for)");
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_busy,       CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gPresBusy,       "async flips answered busy: the previous flip had not latched");
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_hold,       CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gPresHold,       "async flips answered busy: a mode set, home flip or wake commit was running");
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_latched,    CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gPresLatched,    "async flips seen latched");
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_superseded, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gPresSuperseded, "async flips replaced by another commit or a dark head");
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_timeouts,   CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gPresTimeouts,   "async flips that never latched (presentation faulted)");
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_refused,    CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gPresRefused,    "async flips refused (size, cache or NVKMS)");
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_latch_us_sum, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gPresLatchUsSum, "commit-to-seen-latched time, us, summed over nvgfx_fb_latched");
+SYSCTL_INT(_debug, OID_AUTO, nvgfx_fb_latch_us_max, CTLFLAG_RD | CTLFLAG_LOCKED, &gPresLatchUsMax, 0, "longest commit-to-seen-latched time, us");
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_commit_us_sum, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gPresCommitUsSum, "time inside the async commit, us, summed");
+SYSCTL_INT(_debug, OID_AUTO, nvgfx_fb_commit_us_max, CTLFLAG_RD | CTLFLAG_LOCKED, &gPresCommitUsMax, 0, "longest async commit, us");
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_vbl_hop_us_sum, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gVblHopUsSum, "NVKMS vblank callback to VBL proc delivery, us, summed");
+SYSCTL_QUAD(_debug, OID_AUTO, nvgfx_fb_vbl_hop_n,  CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gVblHopN,        "hardware vblanks delivered");
+SYSCTL_INT(_debug, OID_AUTO, nvgfx_fb_vbl_hop_us_max, CTLFLAG_RD | CTLFLAG_LOCKED, &gVblHopUsMax, 0, "slowest vblank delivery, us");
 static bool gFbSysctl = false;
 static void nvrmfbInstallSysctl(void)
 {
@@ -2722,6 +2821,14 @@ static void nvrmfbInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_lean);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_waits);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_timeouts); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_latch_max_us);
+    sysctl_register_oid(&sysctl__debug_nvgfx_fb_submits);    sysctl_register_oid(&sysctl__debug_nvgfx_fb_busy);
+    sysctl_register_oid(&sysctl__debug_nvgfx_fb_hold);       sysctl_register_oid(&sysctl__debug_nvgfx_fb_latched);
+    sysctl_register_oid(&sysctl__debug_nvgfx_fb_superseded); sysctl_register_oid(&sysctl__debug_nvgfx_fb_timeouts);
+    sysctl_register_oid(&sysctl__debug_nvgfx_fb_refused);
+    sysctl_register_oid(&sysctl__debug_nvgfx_fb_latch_us_sum); sysctl_register_oid(&sysctl__debug_nvgfx_fb_latch_us_max);
+    sysctl_register_oid(&sysctl__debug_nvgfx_fb_commit_us_sum); sysctl_register_oid(&sysctl__debug_nvgfx_fb_commit_us_max);
+    sysctl_register_oid(&sysctl__debug_nvgfx_fb_vbl_hop_us_sum); sysctl_register_oid(&sysctl__debug_nvgfx_fb_vbl_hop_n);
+    sysctl_register_oid(&sysctl__debug_nvgfx_fb_vbl_hop_us_max);
 }
 
 bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
@@ -2897,6 +3004,15 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         if (st == 0) {
             if (fModeSet && fSurf) fHeadSlept = true;   // nvKmsSuspend shuts every head down
             fSysSlept = true;                            // the next power-on is a system wake (familyDidWake)
+            // NvGfx: an async flip still queued dies with the heads. Report it and forget its completion slot, so
+            // neither its transaction nor the wake re-flip waits for a notifier NVKMS will not write.
+            if (fPresentLock) {
+                UInt64 tok = 0; int stt = 0;
+                IORecursiveLockLock(fPresentLock);
+                if (fPendSurf && !fPendDead) { presentRetireLocked(NVGFX_PRESENT_SUPERSEDED, &tok, &stt); fSubmissionSeen = false; }
+                IORecursiveLockUnlock(fPresentLock);
+                if (tok) presentNotify(tok, stt);
+            }
             FBLOG("GPU going to standby: head %u off with it", fHead);
         } else if (st == 1) {
             if (fGpuWake) scheduleCall(fGpuWake, 0);
@@ -2930,6 +3046,18 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         h->kapiDevice = fDev;
         h->hClient = 0; h->hDevice = 0; h->hSubDevice = 0;
         FBLOG("nvRmHandles -> kapiDevice %p", fDev);
+        return kIOReturnSuccess;
+    }
+    if (functionName && functionName->isEqualTo(NVGFX_FN_FLIP_SUBMIT))
+        return flipAsync((struct NVGfxFlipSubmit *)param1);
+    if (functionName && functionName->isEqualTo(NVGFX_FN_PRESENT_HOOK)) {
+        struct NVGfxPresentHook *hk = (struct NVGfxPresentHook *)param1;
+        if (!hk || hk->version != NVGFX_PRESENT_ABI_VERSION || !fPresentLock) return kIOReturnBadArgument;
+        IORecursiveLockLock(fPresentLock);
+        fPresHook = hk->fn; fPresRef = hk->refcon;
+        IORecursiveLockUnlock(fPresentLock);
+        FBLOG("present hook %s on head %u (async flips, NVGFX present ABI %u)", hk->fn ? "registered" : "removed", fHead,
+              NVGFX_PRESENT_ABI_VERSION);
         return kIOReturnSuccess;
     }
     if (functionName && functionName->isEqualTo("nvFlipToSurfacePure")) {
@@ -2990,40 +3118,13 @@ bool NVRMNVDAFramebuffer::flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, 
     // and so can never look current. Flips on one framebuffer come from its own display pipe; no other one reads this cache.
     const UInt64 epoch = readFlipEpoch();
     const bool cacheable = mem && epoch != (UInt64)kFlipEpochLimit;
-    if (cacheable) {
-        IOInterruptState state = IOSimpleLockLockDisableInterrupt(fFlipCacheLock);
-        // The epoch is part of the match. The key is the NvKmsKapiMemory pointer, which a buffer allocated after a free
-        // can reuse at the same address; matching an entry recorded in an older epoch would scan out its stale surface
-        // over the reallocated memory, which strobes the panel black every other frame after a refresh or resolution
-        // change. Requiring the current epoch makes a reused address always take a fresh surface.
-        for (unsigned i = 0; i < fFlipCacheN; i++)
-            if (fFlipCache[i].epoch == epoch && fFlipCache[i].cookie == cookie && fFlipCache[i].mem == mem &&
-                fFlipCache[i].pitch == pitch && fFlipCache[i].w == w && fFlipCache[i].h == h) { surf = fFlipCache[i].surf; break; }
-        IOSimpleLockUnlockEnableInterrupt(fFlipCacheLock, state);
-    }
+    if (cacheable) surf = flipCacheFind(mem, w, h, pitch, cookie, epoch);
     if (!surf) {
-        // Prior accepted submissions complete before returning; no non-front cache entry is in flight.
-        unsigned slot = 16;
-        for (unsigned i = 0; i < 16; ++i) if (!fFlipCache[i].surf) { slot = i; break; }
-        if (slot == 16) for (unsigned i = 0; i < 16; ++i)
-            if (fFlipCache[i].surf != fFrontSurf) { slot = i; break; }
-        if (slot == 16 || !cacheable) return false;
-        NVFlipEntry &entry = fFlipCache[slot];
-        if (entry.surf) {
-            fKms->destroySurface(fDev, entry.surf);
-            if (entry.pin) fKms->freeMemory(fDev, entry.pin);
-            entry = {};
-        }
-        struct NvKmsKapiMemory *pin = fKms->dupMemory(fDev, fDev, mem);
-        if (!pin) return false;
-        struct NvKmsKapiCreateSurfaceParams sp = {};
-        sp.planes[0].memory = pin; sp.planes[0].offset = 0; sp.planes[0].pitch = pitch;
-        sp.width = w; sp.height = h; sp.format = NvKmsSurfaceMemoryFormatX8R8G8B8;
-        surf = fKms->createSurface(fDev, &sp);
-        if (!surf) { fKms->freeMemory(fDev, pin); return false; }
-        entry.mem = mem; entry.surf = surf; entry.pin = pin; entry.cookie = cookie; entry.epoch = epoch;
-        entry.w = w; entry.h = h; entry.pitch = pitch;
-        if (slot >= fFlipCacheN) fFlipCacheN = slot + 1;
+        // Prior accepted submissions complete before returning; no non-front cache entry is in flight. (NvGfx: an
+        // async flip may be in flight; flipCacheCreate never picks it, see fPendSurf.)
+        if (!cacheable) return false;
+        surf = flipCacheCreate(mem, w, h, pitch, cookie, epoch);
+        if (!surf) return false;
     }
     struct NvKmsKapiRequestedModeSetConfig *cfg =
         (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
@@ -3062,12 +3163,239 @@ bool NVRMNVDAFramebuffer::flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, 
     IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
     if (rcOut) *rcOut = rc;
     const bool accepted = ok && rc == NV_KMS_FLIP_RESULT_SUCCESS;
-    if (accepted) fFrontSurf = surf;
+    if (accepted) { IORecursiveLockLock(fPresentLock); fFrontSurf = surf; IORecursiveLockUnlock(fPresentLock); }
     fFlipCount++;
     if (fFlipCount <= 8 || (fFlipCount % 600) == 0)
         FBLOG("flipToMemory #%u -> ok %u rc %d (surface %p memory %p)",
               fFlipCount, (unsigned)ok, rc, surf, mem);
     return accepted;
+}
+
+// The KAPI surface cache. Lookups take only fFlipCacheLock. Entries change only in flipCacheCreate, whose caller
+// holds NVRMDisplayGate (so no VRAM grant or release runs: the allocation check and dupMemory see the same memory)
+// and which takes fPresentLock (so the front surface and an async flip still in flight are never chosen as the victim,
+// and flipAsync's lookup-to-commit window, which holds fPresentLock, never sees its surface destroyed).
+struct NvKmsKapiSurface *NVRMNVDAFramebuffer::flipCacheFind(struct NvKmsKapiMemory *mem, unsigned w, unsigned h,
+                                                            unsigned pitch, UInt64 cookie, UInt64 epoch)
+{
+    struct NvKmsKapiSurface *surf = nullptr;
+    IOInterruptState state = IOSimpleLockLockDisableInterrupt(fFlipCacheLock);
+    // The epoch is part of the match. The key is the NvKmsKapiMemory pointer, which a buffer allocated after a free
+    // can reuse at the same address; matching an entry recorded in an older epoch would scan out its stale surface
+    // over the reallocated memory, which strobes the panel black every other frame after a refresh or resolution
+    // change. Requiring the current epoch makes a reused address always take a fresh surface.
+    for (unsigned i = 0; i < fFlipCacheN; i++)
+        if (fFlipCache[i].epoch == epoch && fFlipCache[i].cookie == cookie && fFlipCache[i].mem == mem &&
+            fFlipCache[i].pitch == pitch && fFlipCache[i].w == w && fFlipCache[i].h == h) { surf = fFlipCache[i].surf; break; }
+    IOSimpleLockUnlockEnableInterrupt(fFlipCacheLock, state);
+    return surf;
+}
+struct NvKmsKapiSurface *NVRMNVDAFramebuffer::flipCacheCreate(struct NvKmsKapiMemory *mem, unsigned w, unsigned h,
+                                                              unsigned pitch, UInt64 cookie, UInt64 epoch)
+{
+    const UInt64 bytes = gAllocations.size(mem, cookie);
+    if (!bytes || (UInt64)pitch * h > bytes) return nullptr;
+    IORecursiveLockLock(fPresentLock);
+    unsigned slot = 16;
+    for (unsigned i = 0; i < 16; ++i) if (!fFlipCache[i].surf) { slot = i; break; }
+    if (slot == 16) for (unsigned i = 0; i < 16; ++i)
+        if (fFlipCache[i].surf != fFrontSurf && fFlipCache[i].surf != fPendSurf) { slot = i; break; }
+    if (slot == 16) { IORecursiveLockUnlock(fPresentLock); return nullptr; }
+    NVFlipEntry &entry = fFlipCache[slot];
+    const NVFlipEntry old = entry;
+    { IOInterruptState st = IOSimpleLockLockDisableInterrupt(fFlipCacheLock); entry = {}; IOSimpleLockUnlockEnableInterrupt(fFlipCacheLock, st); }
+    if (old.surf) {
+        fKms->destroySurface(fDev, old.surf);
+        if (old.pin) fKms->freeMemory(fDev, old.pin);
+    }
+    struct NvKmsKapiMemory *pin = fKms->dupMemory(fDev, fDev, mem);
+    if (!pin) { IORecursiveLockUnlock(fPresentLock); return nullptr; }
+    struct NvKmsKapiCreateSurfaceParams sp = {};
+    sp.planes[0].memory = pin; sp.planes[0].offset = 0; sp.planes[0].pitch = pitch;
+    sp.width = w; sp.height = h; sp.format = NvKmsSurfaceMemoryFormatX8R8G8B8;
+    struct NvKmsKapiSurface *surf = fKms->createSurface(fDev, &sp);
+    if (!surf) { fKms->freeMemory(fDev, pin); IORecursiveLockUnlock(fPresentLock); return nullptr; }
+    {
+        IOInterruptState st = IOSimpleLockLockDisableInterrupt(fFlipCacheLock);
+        entry.mem = mem; entry.surf = surf; entry.pin = pin; entry.cookie = cookie; entry.epoch = epoch;
+        entry.w = w; entry.h = h; entry.pitch = pitch;
+        if (slot >= fFlipCacheN) fFlipCacheN = slot + 1;
+        IOSimpleLockUnlockEnableInterrupt(fFlipCacheLock, st);
+    }
+    IORecursiveLockUnlock(fPresentLock);
+    return surf;
+}
+
+// ---- NvGfx present path ------------------------------------------------------------------------------------------
+// flipAsync commits one pure flip and returns at once; NVAccel learns that it latched through fPresHook. At most one
+// async flip is pending per head (one latched front plus one pending): a second submit while the newest completion
+// slot still reads NOT_BEGUN answers kIOReturnBusy and changes nothing. IOAcceleratorFamily2 keeps only one display
+// pipe transaction pending anyway (event_interrupt_gated performs the next one only once isTransactionComplete is
+// true), so a deeper hardware queue would never fill.
+//
+// Locking order: NVRMDisplayGate (global) -> fPresentLock (per framebuffer) -> fFlipCacheLock (spin) -> NVKMS's lock
+// (inside KAPI calls). The async flip takes fPresentLock only, plus the gate on a cache miss before fPresentLock.
+// fPresentLock is held across one commit or one cache insert, never across a wait or a sleep. It is never taken
+// where NVKMS's lock may be held: hwVblIntr runs inside NVKMS's timer worker with that lock held, so it only records
+// the time and schedules hwVblDeliver, which polls.
+void NVRMNVDAFramebuffer::presentNotify(UInt64 token, int status)
+{
+    nvgfx_present_hook_t fn = fPresHook; void *ref = fPresRef;
+    if (fn && token) fn(ref, token, status);
+}
+// The async flip in fPendSurf is no longer the one NVKMS waits on: it latched (or the head went dark under it).
+void NVRMNVDAFramebuffer::presentRetireLocked(int status, UInt64 *token, int *statusOut)
+{
+    if (!fPendSurf || fPendDead) return;
+    fFrontSurf = fPendSurf;
+    *token = fPendToken; *statusOut = status;
+    fPendSurf = nullptr; fPendToken = 0;
+    if (status == NVGFX_PRESENT_SUPERSEDED) OSAddAtomic64(1, &gPresSuperseded);
+}
+bool NVRMNVDAFramebuffer::presentPollLocked(UInt64 *token, int *status)
+{
+    if (!fPendSurf || fPendDead || !fKms || !fDev) return false;
+    NvBool pending = NV_TRUE;
+    const bool read = fKms->getFlipPendingStatus(fDev, fHead, NVKMS_KAPI_LAYER_PRIMARY_IDX, &pending);
+    uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - fPendT0, &ns);
+    if (read && !pending) {
+        const int us = (int)(ns / 1000);
+        OSAddAtomic64(1, &gPresLatched); OSAddAtomic64(us, &gPresLatchUsSum);
+        if (us > gPresLatchUsMax) gPresLatchUsMax = us;
+        presentRetireLocked(NVGFX_PRESENT_LATCHED, token, status);
+        return true;
+    }
+    if (ns < (uint64_t)kPresLatchTimeoutMs * 1000000ull) return false;
+    if (fHeadSlept || fSysSlept || !fPowerOn) {
+        // The head went dark with the flip queued (GPU standby turns every head off). Not a fault: forget the slot,
+        // as a rejected commit does, so the wake re-flip does not wait on a notifier NVKMS will never write.
+        presentRetireLocked(NVGFX_PRESENT_SUPERSEDED, token, status);
+        fSubmissionSeen = false;
+        return true;
+    }
+    // Same policy as the legacy latch wait: keep the old front and the submitted surface alive (fPendDead keeps the
+    // cache from evicting it) and stop presenting until a proven recovery or a reboot.
+    OSAddAtomic64(1, &gPresTimeouts);
+    FBLOG("presentation blocked: async flip on head %u did not latch within %u ms (slot %s)", fHead, kPresLatchTimeoutMs,
+          read ? "NOT_BEGUN" : "unreadable");
+    fSubmissionFaulted = true; fPendDead = true;
+    *token = fPendToken; *status = NVGFX_PRESENT_FAILED; fPendToken = 0;
+    return true;
+}
+void NVRMNVDAFramebuffer::presentPoll()
+{
+    if (!fPresentLock || !fPendSurf) return;
+    UInt64 token = 0; int status = 0;
+    IORecursiveLockLock(fPresentLock);
+    const bool done = presentPollLocked(&token, &status);
+    IORecursiveLockUnlock(fPresentLock);
+    if (done) presentNotify(token, status);
+}
+IOReturn NVRMNVDAFramebuffer::flipAsync(struct NVGfxFlipSubmit *req)
+{
+    struct NVRMFlipRequest *f = req ? req->req : nullptr;
+    if (!f || f->version != NVRM_FLIP_ABI_VERSION || !req->token) return kIOReturnBadArgument;
+    f->flipResult = -1;
+    struct NvKmsKapiMemory *mem = (struct NvKmsKapiMemory *)f->kapiMemory;
+    const unsigned w = f->width, h = f->height, pitch = f->pitch; const UInt64 cookie = f->allocationCookie;
+    if (!mem || !fPresentLock || !fKms || !fDev || fHead >= 8) return kIOReturnBadArgument;
+    // Only the states in which the head is dark or not ours yet. fSysSlept and fPowerOn are not checked: the legacy
+    // flip ignores them and fSysSlept is cleared on one wake path only, so a stale value would freeze the panel.
+    if (OSAddAtomic(0, &fStopping) || fSubmissionFaulted || !fModeSet || !fSurf || fHeadSlept || fConsoleAperture)
+        return kIOReturnNotReady;
+    if (!w || !h || w > 65535 || h > 65535 || (UInt64)w * 4 > pitch) { OSAddAtomic64(1, &gPresRefused); return kIOReturnIOError; }
+    if (w != fW || h != fH) {
+        OSAddAtomic64(1, &gPresRefused);
+        if (fFlipRejects < 8) { fFlipRejects++;
+            FBLOG("flipAsync REFUSED %ux%u pitch %u -- the mode is %ux%u pitch %u", w, h, pitch, fW, fH, fPitch); }
+        return kIOReturnIOError;
+    }
+    const UInt64 epoch = readFlipEpoch();
+    if (epoch == (UInt64)kFlipEpochLimit) { OSAddAtomic64(1, &gPresRefused); return kIOReturnIOError; }
+    struct NvKmsKapiRequestedModeSetConfig *cfg = (struct NvKmsKapiRequestedModeSetConfig *)IOMalloc(sizeof *cfg);
+    struct NvKmsKapiModeSetReplyConfig *rep = (struct NvKmsKapiModeSetReplyConfig *)IOMalloc(sizeof *rep);
+    if (!cfg || !rep) { if (cfg) IOFree(cfg, sizeof *cfg); if (rep) IOFree(rep, sizeof *rep); return kIOReturnNoMemory; }
+    IOReturn result = kIOReturnIOError;
+    UInt64 doneToken = 0; int doneStatus = 0;
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+        IORecursiveLockLock(fPresentLock);
+        if (fPresentHold) { OSAddAtomic64(1, &gPresHold); IORecursiveLockUnlock(fPresentLock); result = kIOReturnBusy; break; }
+        if (fSubmissionSeen) {
+            // The newest completion slot belongs to the last tracked commit, async or not. Pending: one flip is queued
+            // already, so this one waits for the next latch. Not pending: a recorded async flip is on the panel now.
+            NvBool pending = NV_TRUE;
+            if (!fKms->getFlipPendingStatus(fDev, fHead, NVKMS_KAPI_LAYER_PRIMARY_IDX, &pending)) {
+                IORecursiveLockUnlock(fPresentLock); result = kIOReturnNotReady; break;
+            }
+            if (pending) { OSAddAtomic64(1, &gPresBusy); IORecursiveLockUnlock(fPresentLock); result = kIOReturnBusy; break; }
+            if (fPendSurf && !fPendDead && !doneToken) {
+                uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - fPendT0, &ns);
+                const int us = (int)(ns / 1000);
+                OSAddAtomic64(1, &gPresLatched); OSAddAtomic64(us, &gPresLatchUsSum);
+                if (us > gPresLatchUsMax) gPresLatchUsMax = us;
+                presentRetireLocked(NVGFX_PRESENT_LATCHED, &doneToken, &doneStatus);
+            }
+        }
+        struct NvKmsKapiSurface *surf = flipCacheFind(mem, w, h, pitch, cookie, epoch);
+        if (!surf) {
+            IORecursiveLockUnlock(fPresentLock);
+            if (attempt) { OSAddAtomic64(1, &gPresRefused); result = kIOReturnIOError; break; }
+            // A miss: make the KAPI surface under the gate (it excludes VRAM grant and release), then look again.
+            NVRMDisplayGate gate;
+            if (!gate.valid() || fSubmissionFaulted || !flipCacheCreate(mem, w, h, pitch, cookie, epoch)) {
+                OSAddAtomic64(1, &gPresRefused); result = kIOReturnIOError; break;
+            }
+            continue;
+        }
+        nvu_zero(cfg, sizeof *cfg); nvu_zero(rep, sizeof *rep);
+        cfg->headsMask = 1u << fHead;
+        struct NvKmsKapiHeadRequestedConfig *hr = &cfg->headRequestedConfig[fHead];
+        nvrmHeadConfigBaseline(hr);
+        hr->modeSetConfig.bActive = NV_TRUE;
+        hr->modeSetConfig.numDisplays = 1;
+        hr->modeSetConfig.displays[0] = fDisplay;
+        hr->modeSetConfig.mode = fMode;
+        // The legacy pure flip, as flipToMemory builds it (lean when debug.nvrmfb_flip_lean is 1).
+        const bool lean = gFlipLean;
+        if (lean) {
+            hr->flags.olutFpNormScaleChanged = NV_FALSE;
+            for (unsigned i = 0; i < NVKMS_KAPI_LAYER_MAX; i++) hr->layerRequestedConfig[i].flags.cscChanged = NV_FALSE;
+        }
+        struct NvKmsKapiLayerRequestedConfig *lr = &hr->layerRequestedConfig[NVKMS_KAPI_LAYER_PRIMARY_IDX];
+        lr->config.surface = surf;
+        lr->config.srcWidth = (NvU16)w; lr->config.srcHeight = (NvU16)h;   // both checked <= 65535 above
+        lr->config.dstWidth = (NvU16)fRasterW; lr->config.dstHeight = (NvU16)fRasterH;
+        lr->config.compParams.compMode = NVKMS_COMPOSITION_BLENDING_MODE_OPAQUE;
+        lr->config.minPresentInterval = (NvU8)(gFlipInterval < 0 ? 0 : gFlipInterval > 4 ? 4 : gFlipInterval);
+        lr->config.tearing = NV_FALSE;
+        lr->flags.surfaceChanged = NV_TRUE;
+        if (!lean) lr->flags.srcXYChanged = lr->flags.srcWHChanged = lr->flags.dstXYChanged = lr->flags.dstWHChanged = NV_TRUE;
+        const uint64_t t0 = mach_absolute_time();
+        const NvBool ok = submitConfig(cfg, rep, NV_TRUE, false, false, true);
+        const uint64_t t1 = mach_absolute_time();
+        const int rc = ok ? (int)rep->flipResult : -1;
+        f->flipResult = rc;
+        { uint64_t ns = 0; absolutetime_to_nanoseconds(t1 - t0, &ns); const int us = (int)(ns / 1000);
+          OSAddAtomic64(us, &gPresCommitUsSum); if (us > gPresCommitUsMax) gPresCommitUsMax = us; }
+        if (ok && rc == NV_KMS_FLIP_RESULT_SUCCESS) {
+            fPendSurf = surf; fPendToken = req->token; fPendT0 = t1; fPendDead = false;
+            sPresentFb[fHead] = this;
+            OSAddAtomic64(1, &gPresSubmits);
+            result = kIOReturnSuccess;
+        } else {
+            OSAddAtomic64(1, &gPresRefused);
+            result = kIOReturnIOError;
+        }
+        IORecursiveLockUnlock(fPresentLock);
+        fFlipCount++;
+        if (fFlipCount <= 8 || (fFlipCount % 600) == 0)
+            FBLOG("flipAsync #%u -> ok %u rc %d (surface %p memory %p token %llu)", fFlipCount, (unsigned)ok, rc, surf, mem,
+                  (unsigned long long)req->token);
+        break;
+    }
+    IOFree(cfg, sizeof *cfg); IOFree(rep, sizeof *rep);
+    if (doneToken) presentNotify(doneToken, doneStatus);
+    return result;
 }
 
 IODeviceMemory *NVRMNVDAFramebuffer::getVRAMRange()

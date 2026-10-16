@@ -24,6 +24,7 @@
 #include "IOAccelTask.h"
 #include "IOAccelMemoryMap.h"
 #include "../nvrm_gpuva_abi.h"
+#include "../../NVRMFB/fb/nvgfx_present_abi.h"   // NvGfx: async flips with NVRMFB (no NVRM involvement)
 class NVMemoryMap;
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
                                            unsigned long long len, unsigned long long align);
@@ -936,14 +937,19 @@ IOReturn NVDisplayPipe::validateTransaction(IOAccelDisplayPipeTransaction2 *)
 }
 
 static bool nvAccelIopAsyncBusy(const void *pipe);
-bool NVDisplayPipe::isTransactionComplete(IOAccelDisplayPipeTransaction2 *)
+static bool nvPresBusy(const void *pipe, const void *txn);
+// IOAcceleratorFamily2 asks only about its one pending transaction (event_interrupt_gated right after
+// performTransaction, and transaction_interrupt_gated after each signalTransactionInterrupt). Completing it makes it
+// the live transaction and hands the previous live one's surfaces back to WindowServer, so "complete" has to mean
+// "on the panel": the legacy async slot and the NvGfx present queue both answer false until their flip has latched.
+bool NVDisplayPipe::isTransactionComplete(IOAccelDisplayPipeTransaction2 *txn)
 {
-    return gNvIop != 0 && !nvAccelIopAsyncBusy(this);
+    return gNvIop != 0 && !nvAccelIopAsyncBusy(this) && !nvPresBusy(this, txn);
 }
 
 static void nvAccelSurfScanoutSync(IOSurface *s);
 static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head);
-static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
+static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe, void *txn = nullptr);
 static bool nvSurfWaitReady(unsigned int id);
 static void nvAccelIopHome(IOService *fb, unsigned head);
 IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
@@ -982,7 +988,7 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         if ((unsigned long long)pitch < 4ull * w) NVIOP_FAIL(kIOReturnBadArgument, "resource %ux%u: +0xb8 reads %u, which is not a row pitch (need >= %u) — not a surface buffer", w, h, pitch, 4u * w);
         if ((unsigned long long)h * pitch > vm->fBytes) NVIOP_FAIL(kIOReturnOverrun, "resource %ux%u pitch %u exceeds its %llu bytes", w, h, pitch, (unsigned long long)vm->fBytes);
         src = (const volatile unsigned int *)vm->fKva; fromRes = true;
-    } else if (s && nvAccelIopFlip(fb, head, s, this)) {
+    } else if (s && nvAccelIopFlip(fb, head, s, this, txn)) {
         OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk); OSAddAtomic64(1, &gCntIopOkHead[head]);
         return kIOReturnSuccess;
     } else if (s) {
@@ -1207,6 +1213,31 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_async, CTLFLAG_RW | CTLFLAG_LOCKED, &gI
 NVACCEL_CNT(nvaccel_iop_async_flips,   gCntIopAsync,        "swaps completed asynchronously");
 NVACCEL_CNT(nvaccel_iop_async_refused, gCntIopAsyncRefused, "async swaps NVKMS refused (that frame stayed off the panel)");
 NVACCEL_CNT(nvaccel_iop_async_drop,    gCntIopAsyncDrop,    "frames dropped because a flip was still in flight (never expected)");
+/*
+ * NvGfx present path. debug.nvgfx_present_depth: 1 = the legacy single async slot above, exactly as before (the flip
+ * runs on a thread call and NVRMFB waits for it to latch with IOSleep(1) polls); 2 or 3 = the present queue: a
+ * transaction's flip is committed through NVRMFB's nvgfxFlipSubmit, which returns at once, and the transaction
+ * completes when NVRMFB's hook reports the flip latched (KAPI flip event or vblank), with no sleep anywhere on the way.
+ * The depth bounds how many transactions the queue holds that are not yet on the panel. IOAcceleratorFamily2 on
+ * macOS 15.8.1 keeps one transaction pending (it performs the next one only once the pending one is complete), so the
+ * occupancy counter is expected to stay at 1; 3 only matters if the family ever overlaps.
+ */
+static int gPresentDepth = 2;
+static SInt64 gCntPresQueued, gCntPresSubmitted, gCntPresLatched, gCntPresRetired, gCntPresDropped, gCntPresQueueFull,
+              gCntPresBusy, gCntPresInline, gCntPresWorker, gCntPresNoHook;
+static int gPresOccMax;
+SYSCTL_INT(_debug, OID_AUTO, nvgfx_present_depth, CTLFLAG_RW | CTLFLAG_LOCKED, &gPresentDepth, 0, "1 = legacy async flip slot (waits for the latch with sleeps); 2-3 = event-driven present queue of that depth");
+NVACCEL_CNT(nvgfx_present_queued,     gCntPresQueued,     "transactions put in the present queue");
+NVACCEL_CNT(nvgfx_present_submitted,  gCntPresSubmitted,  "queued flips NVRMFB committed");
+NVACCEL_CNT(nvgfx_present_latched,    gCntPresLatched,    "queued flips seen on the panel (their transactions completed)");
+NVACCEL_CNT(nvgfx_present_retired,    gCntPresRetired,    "front surfaces released because a newer flip latched");
+NVACCEL_CNT(nvgfx_present_dropped,    gCntPresDropped,    "queued transactions completed without reaching the panel (refused, dark head, timeout, queue full)");
+NVACCEL_CNT(nvgfx_present_queue_full, gCntPresQueueFull,  "transactions that found the queue at its depth");
+NVACCEL_CNT(nvgfx_present_busy,       gCntPresBusy,       "submits NVRMFB answered busy (retried after 1 ms)");
+NVACCEL_CNT(nvgfx_present_inline,     gCntPresInline,     "flips committed from performTransaction itself (GPU work already done)");
+NVACCEL_CNT(nvgfx_present_worker,     gCntPresWorker,     "flips committed from the worker thread call (after waiting for the GPU or a busy head)");
+NVACCEL_CNT(nvgfx_present_nohook,     gCntPresNoHook,     "transactions sent to the legacy slot because the framebuffer has no present hook");
+SYSCTL_INT(_debug, OID_AUTO, nvgfx_present_occupancy_max, CTLFLAG_RW | CTLFLAG_LOCKED, &gPresOccMax, 0, "most transactions ever in the present queue at once (write 0 to reset)");
 static int gCrcHead = 0;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_crc_head, CTLFLAG_RW | CTLFLAG_LOCKED, &gCrcHead, 0, "b85k-crc: which head debug.nvaccel_crc reads");
 static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS;
@@ -1248,6 +1279,12 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_marks); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_waits);
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_timeouts); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_wait_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_refused); sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_drop);
+    sysctl_register_oid(&sysctl__debug_nvgfx_present_depth);    sysctl_register_oid(&sysctl__debug_nvgfx_present_queued);
+    sysctl_register_oid(&sysctl__debug_nvgfx_present_submitted); sysctl_register_oid(&sysctl__debug_nvgfx_present_latched);
+    sysctl_register_oid(&sysctl__debug_nvgfx_present_retired);  sysctl_register_oid(&sysctl__debug_nvgfx_present_dropped);
+    sysctl_register_oid(&sysctl__debug_nvgfx_present_queue_full); sysctl_register_oid(&sysctl__debug_nvgfx_present_busy);
+    sysctl_register_oid(&sysctl__debug_nvgfx_present_inline);   sysctl_register_oid(&sysctl__debug_nvgfx_present_worker);
+    sysctl_register_oid(&sysctl__debug_nvgfx_present_nohook);   sysctl_register_oid(&sysctl__debug_nvgfx_present_occupancy_max);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h0);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h1);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h2);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h3);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h4);      sysctl_register_oid(&sysctl__debug_nvaccel_igpu);
@@ -1655,6 +1692,7 @@ extern "C" {
 void _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(void *pipe, void *arg);
 struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
 int thread_call_enter(struct thread_call *call);
+int thread_call_free(struct thread_call *call);
 }
 struct NVIopAsync { void *pipe; IOService *fb; IOSurface *s; struct NVRMFlipRequest f; volatile SInt32 busy; struct thread_call *call; };
 static NVIopAsync gIopAs[kNvMaxFB];
@@ -1712,7 +1750,240 @@ static bool nvAccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSur
     thread_call_enter(e->call);
     return true;
 }
-static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe)
+// ---- NvGfx present queue --------------------------------------------------------------------------------------
+// Per head, a few slots: QUEUED (performTransaction accepted it), SUBMITTING (one thread is committing it through
+// NVRMFB), SUBMITTED (committed, not yet latched). A slot goes back to FREE when its flip latches (its surface becomes
+// gIopFlipFront, as the legacy paths do) or when it is dropped. At most one slot per head is SUBMITTING or SUBMITTED,
+// because NVRMFB keeps one pending flip per head. gPresLock is a spin lock: nothing blocks or calls out while it is
+// held. Every user runs in thread context (performTransaction and isTransactionComplete on the family's work loop, the
+// hook on NVRMFB's threads, the worker), so the plain lock without disabling interrupts is enough.
+enum { kPresFree = 0, kPresQueued, kPresSubmitting, kPresSubmitted };
+enum { kPresSlots = 8, kPresBusyTries = 200 };
+struct NVPresEntry { void *txn; void *pipe; IOService *fb; IOSurface *s; struct NVRMFlipRequest f; unsigned long long token;
+                     int state; unsigned busyTries; };
+struct NVPresHead { NVPresEntry e[kPresSlots]; IOService *hookFb, *noHookFb; struct thread_call *work; };
+static NVPresHead gPres[kNvMaxFB];
+static IOSimpleLock *gPresLock;
+static unsigned long long gPresToken;
+static unsigned gPresLogs;
+#define NVPRESLOG(fmt, ...) do { if (gPresLogs < 24) { gPresLogs++; ALOG("present: " fmt, ##__VA_ARGS__); } } while (0)
+static IOSimpleLock *nvPresLock()
+{
+    if (!gPresLock) { IOSimpleLock *l = IOSimpleLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gPresLock)) IOSimpleLockFree(l); }
+    return gPresLock;
+}
+static unsigned nvPresOccupancy(const NVPresHead *ph)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < kPresSlots; i++) if (ph->e[i].state != kPresFree) n++;
+    return n;
+}
+static bool nvPresBusy(const void *pipe, const void *txn)
+{
+    IOSimpleLock *l = gPresLock;
+    if (!l || !pipe) return false;
+    bool busy = false;
+    IOSimpleLockLock(l);
+    for (unsigned h = 0; h < kNvMaxFB && !busy; h++)
+        for (unsigned i = 0; i < kPresSlots; i++) {
+            const NVPresEntry *e = &gPres[h].e[i];
+            if (e->state != kPresFree && e->pipe == pipe && (!txn || e->txn == txn)) { busy = true; break; }
+        }
+    IOSimpleLockUnlock(l);
+    return busy;
+}
+// Non-blocking form of nvSurfWaitReady: true while the plugin still marks this surface's composite as running.
+static bool nvSurfPendingNow(unsigned int id)
+{
+    IOLock *l = gSurfPendLock;
+    if (!l || !id || !gSurfGpuOn) return false;
+    bool pending = false;
+    IOLockLock(l);
+    for (unsigned i = 0; i < 32; i++) if (gSurfPend[i].id == id) { pending = true; break; }
+    IOLockUnlock(l);
+    return pending;
+}
+static void nvPresKick(unsigned head, unsigned delayMs)
+{
+    struct thread_call *c = gPres[head].work;
+    if (!c) return;
+    if (!delayMs) { thread_call_enter(c); return; }
+    uint64_t deadline = 0; clock_interval_to_deadline(delayMs, kMillisecondScale, &deadline);
+    thread_call_enter_delayed(c, deadline);
+}
+// Called by NVRMFB (see nvgfx_present_abi.h for the context rules): never calls back into NVRMFB.
+static void nvPresHook(void *refcon, unsigned long long token, int status)
+{
+    const unsigned head = (unsigned)(uintptr_t)refcon;
+    IOSimpleLock *l = gPresLock;
+    if (head >= kNvMaxFB || !l || !token) return;
+    IOSurface *release = nullptr, *dropped = nullptr; void *pipe = nullptr; bool more = false, latched = false;
+    unsigned id = 0, w = 0, hh = 0;
+    IOSimpleLockLock(l);
+    NVPresHead *ph = &gPres[head];
+    for (unsigned i = 0; i < kPresSlots; i++) {
+        NVPresEntry *e = &ph->e[i];
+        if (e->token != token || (e->state != kPresSubmitting && e->state != kPresSubmitted)) continue;
+        pipe = e->pipe;
+        if (status == NVGFX_PRESENT_FAILED) {
+            dropped = e->s;
+        } else {
+            // On the panel: it becomes the front, the old front becomes the previous one (kept one flip longer,
+            // as the legacy paths keep it), and the one before that is released.
+            release = gIopFlipPrev[head];
+            gIopFlipPrev[head] = gIopFlipFront[head]; gIopFlipFront[head] = e->s; gIopFlipped[head] = true;
+            latched = true; w = e->f.width; hh = e->f.height;
+        }
+        e->s = nullptr; e->state = kPresFree; e->txn = nullptr; e->pipe = nullptr;
+        break;
+    }
+    for (unsigned i = 0; i < kPresSlots; i++) if (ph->e[i].state == kPresQueued) more = true;
+    IOSimpleLockUnlock(l);
+    if (latched) {
+        OSAddAtomic64(1, &gCntPresLatched);
+        const SInt64 n = OSAddAtomic64(1, &gCntIopFlip); OSAddAtomic64(1, &gCntIopAsync);
+        if (release) OSAddAtomic64(1, &gCntPresRetired);
+        if (gIopFlipFront[head]) id = gIopFlipFront[head]->getSurfaceID();
+        if (n < 4 || n == 600 || (n & 0xffff) == 0)
+            NVPRESLOG("swap #%lld head %u: surface 0x%x %ux%u on the panel (%s)", (long long)n + 1, head, id, w, hh,
+                      status == NVGFX_PRESENT_LATCHED ? "latched" : "superseded");
+    }
+    if (dropped) { OSAddAtomic64(1, &gCntPresDropped); NVPRESLOG("flip token %llu on head %u never latched -- transaction completed without it", token, head); }
+    if (release) ((OSObject *)release)->release();
+    if (dropped) ((OSObject *)dropped)->release();
+    if (pipe) _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(pipe, nullptr);
+    if (more) nvPresKick(head, 0);
+}
+static bool nvPresHookFor(IOService *fb, unsigned head)
+{
+    NVPresHead *ph = &gPres[head];
+    if (ph->hookFb == fb) return true;
+    if (ph->noHookFb == fb) return false;
+    struct NVGfxPresentHook hk; nvSVZero(&hk, sizeof hk);
+    hk.version = NVGFX_PRESENT_ABI_VERSION; hk.fn = nvPresHook; hk.refcon = (void *)(uintptr_t)head;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVGFX_FN_PRESENT_HOOK);
+    IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &hk, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
+    if (sym) sym->release();
+    if (rr == kIOReturnSuccess) { ph->hookFb = fb; ALOG("present: head %u uses the NvGfx present queue (depth %d)", head, gPresentDepth); return true; }
+    ph->noHookFb = fb;
+    ALOG("present: head %u framebuffer has no present hook (0x%x) -- legacy async flips", head, (unsigned)rr);
+    return false;
+}
+// Commits the oldest queued flip of a head if none is in flight. mayBlock: the worker thread call, which may wait for
+// the surface's GPU work (#196 marks); performTransaction passes false and hands such a frame to the worker instead.
+static void nvPresPump(unsigned head, bool mayBlock)
+{
+    IOSimpleLock *l = gPresLock;
+    if (!l || head >= kNvMaxFB) return;
+    NVPresHead *ph = &gPres[head];
+    for (;;) {
+        NVPresEntry *e = nullptr;
+        IOSimpleLockLock(l);
+        bool inFlight = false;
+        for (unsigned i = 0; i < kPresSlots; i++) {
+            NVPresEntry *c = &ph->e[i];
+            if (c->state == kPresSubmitting || c->state == kPresSubmitted) inFlight = true;
+            else if (c->state == kPresQueued && (!e || c->token < e->token)) e = c;
+        }
+        if (inFlight || !e) { IOSimpleLockUnlock(l); return; }
+        e->state = kPresSubmitting;
+        IOService *fb = e->fb; IOSurface *s = e->s; void *pipe = e->pipe;
+        struct NVRMFlipRequest f = e->f; const unsigned long long token = e->token;
+        IOSimpleLockUnlock(l);
+
+        const unsigned id = s->getSurfaceID();
+        if (!mayBlock && nvSurfPendingNow(id)) {
+            IOSimpleLockLock(l);
+            if (e->state == kPresSubmitting && e->token == token) e->state = kPresQueued;
+            IOSimpleLockUnlock(l);
+            nvPresKick(head, 0);
+            return;
+        }
+        if (mayBlock) nvSurfWaitReady(id);   // WindowServer did not wait for this composite; the flip does, off its thread
+        struct NVGfxFlipSubmit sub; nvSVZero(&sub, sizeof sub);
+        sub.version = NVGFX_PRESENT_ABI_VERSION; sub.req = &f; sub.token = token;
+        const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVGFX_FN_FLIP_SUBMIT);
+        IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &sub, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
+        if (sym) sym->release();
+
+        IOSurface *drop = nullptr; bool retry = false, refused = false;
+        IOSimpleLockLock(l);
+        if (e->token == token && e->state == kPresSubmitting) {   // otherwise the hook already saw it latch
+            if (rr == kIOReturnSuccess) e->state = kPresSubmitted;
+            else if (rr == kIOReturnBusy && ++e->busyTries <= kPresBusyTries) { e->state = kPresQueued; retry = true; }
+            else { drop = e->s; e->s = nullptr; e->state = kPresFree; e->txn = nullptr; e->pipe = nullptr; refused = rr == kIOReturnIOError; }
+        }
+        IOSimpleLockUnlock(l);
+        if (rr == kIOReturnSuccess) {
+            OSAddAtomic64(1, &gCntPresSubmitted); OSAddAtomic64(1, mayBlock ? &gCntPresWorker : &gCntPresInline);
+            gIopAsyncRefuseRun = 0;
+            return;
+        }
+        if (retry) { OSAddAtomic64(1, &gCntPresBusy); nvPresKick(head, 1); return; }
+        if (drop) {
+            OSAddAtomic64(1, &gCntPresDropped);
+            if (refused) {
+                OSAddAtomic64(1, &gCntIopAsyncRefused); OSAddAtomic64(1, &gCntIopFlipNo[7]);
+                if (gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: queued flip REFUSED (0x%x, flipResult %d) head %u -- that frame is not on the panel",
+                                                             (unsigned)rr, f.flipResult, head); }
+                if (++gIopAsyncRefuseRun >= 3 && gIopAsync) {
+                    gIopAsync = 0;
+                    ALOG("iop: b89k 3 async refusals in a row -- debug.nvaccel_iop_async=0 (synchronous flip, which copies on refusal)");
+                }
+            } else NVPRESLOG("flip on head %u not taken (0x%x) -- transaction completed without it", head, (unsigned)rr);
+            ((OSObject *)drop)->release();
+            _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(pipe, nullptr);
+        }
+        // a dropped entry frees the head: try the next queued one
+    }
+}
+static void nvPresWork(void *p0, void *)
+{
+    nvPresPump((unsigned)(uintptr_t)p0, true);
+}
+static bool nvPresEnqueue(void *pipe, void *txn, IOService *fb, unsigned head, IOSurface *s, const struct NVRMFlipRequest *f)
+{
+    IOSimpleLock *l = nvPresLock();
+    NVPresHead *ph = &gPres[head];
+    if (!l || !nvPresHookFor(fb, head)) { OSAddAtomic64(1, &gCntPresNoHook); return nvAccelIopAsyncStart(pipe, fb, head, s, f); }
+    if (!ph->work) {
+        struct thread_call *c = thread_call_allocate(nvPresWork, (void *)(uintptr_t)head);
+        if (c && !OSCompareAndSwapPtr(nullptr, c, (void *volatile *)&ph->work)) thread_call_free(c);
+        if (!ph->work) return nvAccelIopAsyncStart(pipe, fb, head, s, f);
+    }
+    const unsigned depth = gPresentDepth > 3 ? 3u : (unsigned)gPresentDepth;
+    // Room for one more transaction that is not yet on the panel. Waits as long as the legacy slot does (50 x 1 ms);
+    // with the family's one pending transaction this is not expected to wait at all.
+    bool room = false;
+    for (unsigned i = 0; i < 50; i++) {
+        IOSimpleLockLock(l);
+        room = nvPresOccupancy(ph) < depth;
+        IOSimpleLockUnlock(l);
+        if (room) break;
+        if (!i) OSAddAtomic64(1, &gCntPresQueueFull);
+        IOSleep(1);
+    }
+    if (!room) { OSAddAtomic64(1, &gCntPresDropped); OSAddAtomic64(1, &gCntIopAsyncDrop); return true; }
+    ((OSObject *)s)->retain();
+    bool placed = false;
+    IOSimpleLockLock(l);
+    for (unsigned i = 0; i < kPresSlots; i++) {
+        NVPresEntry *e = &ph->e[i];
+        if (e->state != kPresFree) continue;
+        e->txn = txn; e->pipe = pipe; e->fb = fb; e->s = s; e->f = *f; e->token = ++gPresToken; e->busyTries = 0;
+        e->state = kPresQueued; placed = true;
+        break;
+    }
+    const int occ = (int)nvPresOccupancy(ph);
+    IOSimpleLockUnlock(l);
+    if (!placed) { ((OSObject *)s)->release(); OSAddAtomic64(1, &gCntPresDropped); return true; }
+    if (occ > gPresOccMax) gPresOccMax = occ;
+    OSAddAtomic64(1, &gCntPresQueued);
+    nvPresPump(head, false);
+    return true;
+}
+static bool nvPresEnqueue(void *pipe, void *txn, IOService *fb, unsigned head, IOSurface *s, const struct NVRMFlipRequest *f);
+static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe, void *txn)
 {
     if (!gIopFlip || !fb || !s || head >= kNvMaxFB) return false;
     // zero-copy scan-out is an NVIDIA display-engine flip; another vendor's panel (NMIntelFB) always takes the copy
@@ -1744,6 +2015,8 @@ static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pip
     if (!W || !H || P < 4 * W || H * P > bytes) return nvAccelIopFlipNo(6);
     struct NVRMFlipRequest f; nvSVZero(&f, sizeof f);
     f.version = NVRM_FLIP_ABI_VERSION; f.kapiMemory = kmem; f.allocationCookie = vm->fAllocationCookie; f.width = (unsigned)W; f.height = (unsigned)H; f.pitch = (unsigned)P;
+    // NvGfx: depth 1 is the legacy single async slot, unchanged; 2-3 the event-driven present queue.
+    if (gIopAsync && pipe && txn && gPresentDepth >= 2) return nvPresEnqueue(pipe, txn, fb, head, s, &f);
     if (gIopAsync && pipe) return nvAccelIopAsyncStart(pipe, fb, head, s, &f);
     nvSurfWaitReady(s->getSurfaceID());
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("nvFlipToSurfacePure");
