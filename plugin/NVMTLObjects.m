@@ -2693,16 +2693,23 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 NSArray *vb = _vbufAt[@1]; float vx = -1, vy = -1;
                 if (vb) { NVMTLBuffer *nb = vb[0]; size_t off = [vb[1] unsignedLongValue]; const uint8_t *base = nb->_shadow.map ? nb->_shadow.map : (nb->_hostPtr ? nb->_hostPtr : nb->_b.map);
                     if (base && off + 8 <= nb->_b.size) { memcpy(&vx, base + off, 4); memcpy(&vy, base + off + 4, 4); } }
-                const BOOL dock = vy > 1000.f && W <= 160 && H <= 160 && (W >= 100 || H >= 100);   // N-118: label-sized only; icon tiles and 32x32 glass ate the budget in one frame
+                // N-120: the vertex is in the layer's space; the mvp at vertex buffer 2 maps it to clip space. Screen pixels
+                // follow from that (Metal clip y points up), and only they tell whether a draw lands in the Dock band.
+                float sx = vx, sy = vy; { NSArray *mb = _vbufAt[@2];
+                    if (mb && vx >= -1e6f) { NVMTLBuffer *nb = mb[0]; size_t off = [mb[1] unsignedLongValue]; const uint8_t *base = nb->_shadow.map ? nb->_shadow.map : (nb->_hostPtr ? nb->_hostPtr : nb->_b.map);
+                        if (base && off + 64 <= nb->_b.size) { float m[16]; memcpy(m, base + off, 64);
+                            float cx = m[0] * vx + m[4] * vy + m[12], cy = m[1] * vx + m[5] * vy + m[13], cw = m[3] * vx + m[7] * vy + m[15];
+                            if (cw != 0.f) { cx /= cw; cy /= cw; } sx = (cx + 1.f) * 0.5f * (float)tw0; sy = (1.f - cy) * 0.5f * (float)(_target ? [_target nvi]->h : 0u); } } }
+                const BOOL dock = sy > 1100.f && W <= 160 && H <= 160 && (W >= 100 || H >= 100);
                 const BOOL comp = dock || nvgfx_rb_contains(bt);
                 if (comp) { if (atomic_fetch_add(&ncompdraw, 1) >= 60) continue; }
                 else { if (W < 16 || W > 160 || H < 16 || H > 160 || (W > H ? W - H : H - W) > 8 || atomic_load(&nbadge) >= 300) continue; atomic_fetch_add(&nbadge, 1); }
                 if (comp) {
-                    nvgfx_wstrace("COMP draw enc %p fs %s tex %p %zux%zu fmt %lu %s fetch mask %#x zero %#x vertex0 %.1f %.1f vp %s%.4g %.4g %.4g %.4g sc %s%u %u %u %u target %ux%u surf %u nEnd %u",
-                                  (__bridge void *)self, _ps->_fname.UTF8String, (__bridge void *)bt, W, H, (unsigned long)bt.pixelFormat, dock ? "dock" : "readback", _ps->_p.fetch_mask, _ps->_p.fetch_zero, vx, vy,
+                    nvgfx_wstrace("COMP draw enc %p fs %s tex %p %zux%zu fmt %lu %s fetch mask %#x zero %#x vertex0 %.1f %.1f screen %.1f %.1f vp %s%.4g %.4g %.4g %.4g sc %s%u %u %u %u target %ux%u surf %u nEnd %u",
+                                  (__bridge void *)self, _ps->_fname.UTF8String, (__bridge void *)bt, W, H, (unsigned long)bt.pixelFormat, dock ? "dock" : "readback", _ps->_p.fetch_mask, _ps->_p.fetch_zero, vx, vy, sx, sy,
                                   _hasVP ? "" : "(default) ", _vp[0], _vp[1], _vp[2], _vp[3], _hasSC ? "" : "(default) ", _sc[0], _sc[1], _sc[2], _sc[3],
                                   tw0, _target ? [_target nvi]->h : 0u, (_target->_parent ?: _target)->_surf ? (unsigned)IOSurfaceGetID((_target->_parent ?: _target)->_surf) : 0u, (unsigned)_cb->_nEnd);
-                    if (vx >= 0 && vy >= 0 && !objc_getAssociatedObject(self, NVGFX_DISPRB_KEY)) objc_setAssociatedObject(self, NVGFX_DISPRB_KEY, @[@(vx), @(vy)], OBJC_ASSOCIATION_RETAIN);
+                    if (sx >= 0 && sy >= 0 && !objc_getAssociatedObject(self, NVGFX_DISPRB_KEY)) objc_setAssociatedObject(self, NVGFX_DISPRB_KEY, @[@(sx), @(sy)], OBJC_ASSOCIATION_RETAIN);
                     // N-119: everything an offline replay of this composite needs: constants, blend, vertices, matrices, uniforms, indices
                     if (W >= 100 || H >= 100) {
                         id ffn2 = _ps->_descriptor.fragmentFunction, vfn2 = _ps->_descriptor.vertexFunction;
@@ -2870,6 +2877,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 nvgfx_cap_hex("OFFS VBUF", _vbufAt, 1, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 0, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 2, 64); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 3, 64);   // N-102: mvp and texture_matrix too
                 // N-117: badge-like passes only (a pill or a small glyph into a small offscreen); N-103: read the target back when this pass ends
                 if ([_target nvi]->w <= 256 && [_target nvi]->h <= 384 && ((pf == 30 && W <= 64) || (pf == 80 && W <= 64 && H <= 64))) { objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
+                    nvgfx_wstrace("TGT FLAG enc %p target %p %ux%u fmt %lu glyph %zux%zu fmt %lu", (__bridge void *)self, (__bridge void *)_target, [_target nvi]->w, [_target nvi]->h, (unsigned long)_target.pixelFormat, W, H, pf);
                     NSMutableArray *gl = objc_getAssociatedObject(self, NVGFX_GLYRB_KEY); if (!gl) { gl = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_GLYRB_KEY, gl, OBJC_ASSOCIATION_RETAIN); }
                     [gl addObject:bt];
                     NSMutableArray *br = objc_getAssociatedObject(self, NVGFX_BUFRB_KEY); if (!br) { br = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_BUFRB_KEY, br, OBJC_ASSOCIATION_RETAIN); }
@@ -3521,10 +3529,11 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
         objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
         static _Atomic unsigned nrb; { static _Atomic unsigned gen_; unsigned g_ = atomic_load(&nvgfx_arm_gen);
           if (atomic_load(&gen_) != g_) { atomic_store(&gen_, g_); atomic_store(&nrb, 0); pthread_mutex_lock(&gNvgfxRbMu); [gNvgfxRbSeen removeAllObjects]; pthread_mutex_unlock(&gNvgfxRbMu); } }
-        NVMTLTexture *tgt = _target; NSUInteger W = tgt.width, H = tgt.height, bpp = 4;
+        NVMTLTexture *tgt = _target; NSUInteger W = tgt.width, H = tgt.height, bpp = tgt.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : 4;   // N-120: float offscreens too
         pthread_mutex_lock(&gNvgfxRbMu); if (!gNvgfxRbSeen) gNvgfxRbSeen = [NSMutableSet new]; NSValue *rk = [NSValue valueWithPointer:(__bridge void *)tgt];
         BOOL first = gNvgfxRbSeen.count < 48; [gNvgfxRbSeen addObject:rk]; pthread_mutex_unlock(&gNvgfxRbMu);   // N-106: per pass, not per target (label passes share textures)
-        if (first && tgt.pixelFormat == MTLPixelFormatBGRA8Unorm && W * H * bpp <= 2048 * 1024 && atomic_fetch_add(&nrb, 1) < 48) {
+        nvgfx_wstrace("TGT SCHED enc %p target %p %lux%lu fmt %lu first %d seen %lu nrb %u", (__bridge void *)self, (__bridge void *)tgt, (unsigned long)W, (unsigned long)H, (unsigned long)tgt.pixelFormat, (int)first, (unsigned long)gNvgfxRbSeen.count, atomic_load(&nrb));
+        if (first && (tgt.pixelFormat == MTLPixelFormatBGRA8Unorm || tgt.pixelFormat == MTLPixelFormatRGBA16Float) && W * H * bpp <= 2048 * 1024 && atomic_fetch_add(&nrb, 1) < 48) {
             id<MTLBuffer> rb = [[_cb device] newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
             id<MTLBlitCommandEncoder> bl = [_cb blitCommandEncoder];
             [bl copyFromTexture:tgt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:W * bpp destinationBytesPerImage:W * H * bpp];
