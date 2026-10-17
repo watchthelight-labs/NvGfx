@@ -2681,6 +2681,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
         unsigned tw0 = _target ? [_target nvi]->w : 0u;
         static _Atomic unsigned nbadge;
         static _Atomic unsigned ncompdraw;
+        NVGFX_FRESH(nbadge); NVGFX_FRESH(ncompdraw);
         if (tw0 >= 1000 && (atomic_load(&nbadge) < 300 || atomic_load(&ncompdraw) < 40)) {
             NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
             for (NSNumber *slot in fo) {
@@ -2782,7 +2783,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
     if (nvgfx_wstrace_on() && _target && [_target nvi]->w <= 1024 && [_target nvi]->h <= 1024 && !([_target nvi]->w >= 1280)) {
         // N-97: every draw into a small offscreen target (any shader): the badge digit's field pass was never named in the
         // SDF trace, so log target, shader, textures and constants for all of them.
-        static _Atomic unsigned noff;
+        static _Atomic unsigned noff; NVGFX_FRESH(noff);
         if (atomic_fetch_add(&noff, 1) < 6000) {
             NSDictionary *ft = objc_getAssociatedObject(self, NVGFX_FTEX_KEY);
             NVMTLTexture *tr = _target->_parent ?: _target;
@@ -2829,6 +2830,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 const size_t lim = atomic_load(&alltex) ? 512 : 256;
                 if (!((pf == 1 || pf == 30) || (atomic_load(&alltex) && pf == 80)) || W > lim || H > lim) continue;
                 // once per texture object (the clock text redraws every second and would eat any per-draw budget)
+                { static _Atomic unsigned gen_; unsigned g_ = atomic_load(&nvgfx_arm_gen); if (atomic_load(&gen_) != g_) { atomic_store(&gen_, g_); pthread_mutex_lock(&gmu); [gseen removeAllObjects]; pthread_mutex_unlock(&gmu); } }
                 pthread_mutex_lock(&gmu); if (!gseen) gseen = [NSMutableSet new];
                 NSValue *gk = [NSValue valueWithPointer:(__bridge void *)bt]; BOOL gfirst = ![gseen containsObject:gk] && gseen.count < 200; if (gfirst) [gseen addObject:gk];
                 pthread_mutex_unlock(&gmu);
@@ -3474,7 +3476,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     { NSArray *at = objc_getAssociatedObject(self, NVGFX_DISPRB_KEY);
       if (at && _target && nvgfx_wstrace_on()) {
         objc_setAssociatedObject(self, NVGFX_DISPRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
-        static _Atomic unsigned ndrb;
+        static _Atomic unsigned ndrb; NVGFX_FRESH(ndrb);
         NVMTLTexture *tgt = _target; NSUInteger TW = tgt.width, TH = tgt.height;
         const NSUInteger RW = 320, RH = 200; NSInteger x0 = (NSInteger)[at[0] floatValue] - 120, y0 = (NSInteger)[at[1] floatValue] - 60;
         if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if ((NSUInteger)x0 + RW > TW) x0 = (NSInteger)(TW - RW); if ((NSUInteger)y0 + RH > TH) y0 = (NSInteger)(TH - RH);
@@ -3498,7 +3500,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
         // N-103: the label pass that drew a glyph texture: copy its colour target into a shared buffer now (the pass is
         // closed, the command buffer is still open) and log the pixels once the GPU has finished. Once per target.
         objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
-        static _Atomic unsigned nrb;
+        static _Atomic unsigned nrb; { static _Atomic unsigned gen_; unsigned g_ = atomic_load(&nvgfx_arm_gen);
+          if (atomic_load(&gen_) != g_) { atomic_store(&gen_, g_); atomic_store(&nrb, 0); pthread_mutex_lock(&gNvgfxRbMu); [gNvgfxRbSeen removeAllObjects]; pthread_mutex_unlock(&gNvgfxRbMu); } }
         NVMTLTexture *tgt = _target; NSUInteger W = tgt.width, H = tgt.height, bpp = 4;
         pthread_mutex_lock(&gNvgfxRbMu); if (!gNvgfxRbSeen) gNvgfxRbSeen = [NSMutableSet new]; NSValue *rk = [NSValue valueWithPointer:(__bridge void *)tgt];
         BOOL first = gNvgfxRbSeen.count < 48; [gNvgfxRbSeen addObject:rk]; pthread_mutex_unlock(&gNvgfxRbMu);   // N-106: per pass, not per target (label passes share textures)
