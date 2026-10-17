@@ -2624,7 +2624,8 @@ static const void *NVGFX_FTEX_KEY = &NVGFX_FTEX_KEY;
 static const void *NVGFX_FSAMP_KEY = &NVGFX_FSAMP_KEY;
 static const void *NVGFX_CAP_KEY = &NVGFX_CAP_KEY;
 static const void *NVGFX_TGTRB_KEY = &NVGFX_TGTRB_KEY;
-static const void *NVGFX_DISPRB_KEY = &NVGFX_DISPRB_KEY;   // N-115: screen pass that composited a read-back offscreen: read the region around the draw back   // N-103: the pass that drew a glyph: read its target back at completion
+static const void *NVGFX_DISPRB_KEY = &NVGFX_DISPRB_KEY;
+static _Atomic uint64_t gNvgfxLabelNs;   // N-121: when a badge-like offscreen pass was last flagged; composites are logged only in the 400 ms after it   // N-115: screen pass that composited a read-back offscreen: read the region around the draw back   // N-103: the pass that drew a glyph: read its target back at completion
 static const void *NVGFX_GLYRB_KEY = &NVGFX_GLYRB_KEY;   // N-105: glyph textures sampled by this pass, read back from the GPU at completion
 static const void *NVGFX_BUFRB_KEY = &NVGFX_BUFRB_KEY;   // N-107: (name, buffer, offset) of the glyph draw's uniform/vertex buffers, read back at completion
 static NSMutableSet *gNvgfxRbSeen; static pthread_mutex_t gNvgfxRbMu = PTHREAD_MUTEX_INITIALIZER;   // targets read back so far (N-104: chained)
@@ -2701,7 +2702,8 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                             float cx = m[0] * vx + m[4] * vy + m[12], cy = m[1] * vx + m[5] * vy + m[13], cw = m[3] * vx + m[7] * vy + m[15];
                             if (cw != 0.f) { cx /= cw; cy /= cw; } sx = (cx + 1.f) * 0.5f * (float)tw0; sy = (1.f - cy) * 0.5f * (float)(_target ? [_target nvi]->h : 0u); } } }
                 const BOOL dock = sy > 1100.f && W <= 160 && H <= 160 && (W >= 100 || H >= 100);
-                const BOOL comp = dock || nvgfx_rb_contains(bt);
+                uint64_t sinceLabel = ~0ull; { uint64_t t0 = atomic_load(&gNvgfxLabelNs); if (t0) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); sinceLabel = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - t0; } }
+                const BOOL comp = (dock || nvgfx_rb_contains(bt)) && sinceLabel < 400000000ull;   // N-121: the same scratch texture is composited every frame; keep the budget for the frames after the label pass
                 if (comp) { if (atomic_fetch_add(&ncompdraw, 1) >= 60) continue; }
                 else { if (W < 16 || W > 160 || H < 16 || H > 160 || (W > H ? W - H : H - W) > 8 || atomic_load(&nbadge) >= 300) continue; atomic_fetch_add(&nbadge, 1); }
                 if (comp) {
@@ -2878,6 +2880,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 // N-117: badge-like passes only (a pill or a small glyph into a small offscreen); N-103: read the target back when this pass ends
                 if ([_target nvi]->w <= 256 && [_target nvi]->h <= 384 && ((pf == 30 && W <= 64) || (pf == 80 && W <= 64 && H <= 64))) { objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
                     nvgfx_wstrace("TGT FLAG enc %p target %p %ux%u fmt %lu glyph %zux%zu fmt %lu", (__bridge void *)self, (__bridge void *)_target, [_target nvi]->w, [_target nvi]->h, (unsigned long)_target.pixelFormat, W, H, pf);
+                    { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); atomic_store(&gNvgfxLabelNs, (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec); }
                     NSMutableArray *gl = objc_getAssociatedObject(self, NVGFX_GLYRB_KEY); if (!gl) { gl = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_GLYRB_KEY, gl, OBJC_ASSOCIATION_RETAIN); }
                     [gl addObject:bt];
                     NSMutableArray *br = objc_getAssociatedObject(self, NVGFX_BUFRB_KEY); if (!br) { br = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_BUFRB_KEY, br, OBJC_ASSOCIATION_RETAIN); }
