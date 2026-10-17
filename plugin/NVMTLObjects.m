@@ -2758,6 +2758,9 @@ static BOOL nvgfx_ws_interesting(NSString *n)
             NSData *vj = vfc ? [NSJSONSerialization dataWithJSONObject:vfc options:NSJSONWritingSortedKeys error:NULL] : nil;
             NSString *vs2 = vj ? [[NSString alloc] initWithData:vj encoding:NSUTF8StringEncoding] : @"-";
             nvgfx_wstrace("OFFS vfc enc %p vs %s vfc %s", (__bridge void *)self, _ps->_vname.UTF8String, [vs2 substringToIndex:MIN((NSUInteger)300, vs2.length)].UTF8String);
+            nvgfx_wstrace("OFFS state enc %p vp %s%.4g %.4g %.4g %.4g sc %s%u %u %u %u cull %u ds %p stencilref %u", (__bridge void *)self, _hasVP ? "" : "(default) ", _vp[0], _vp[1], _vp[2], _vp[3],
+                          _hasSC ? "" : "(default) ", _sc[0], _sc[1], _sc[2], _sc[3], (unsigned)_cull, (__bridge void *)_ds, 0u);   // N-106: the per-draw state the replay never had
+            nvgfx_wstrace("OFFS pass enc %p clear %.3f %.3f %.3f %.3f begun %d nEnd %u", (__bridge void *)self, _clear[0], _clear[1], _clear[2], _clear[3], (int)_begun, (unsigned)_cb->_nEnd);
             nvgfx_wstrace("OFFS draw%s enc %p fs %s vs %s target %ux%u fmt %lu surf %u label '%s' | blend %s | ftex %s | fc %s", NVMTL_RELEASE ? "" : " dbg", (__bridge void *)self,
                           _ps->_fname.UTF8String, _ps->_vname.UTF8String, [_target nvi]->w, [_target nvi]->h, (unsigned long)_target.pixelFormat,
                           tr->_surf ? (unsigned)IOSurfaceGetID(tr->_surf) : 0u, _target.label.UTF8String ?: "", _ps->_blend.UTF8String ?: "-",
@@ -3416,17 +3419,17 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
         static _Atomic unsigned nrb;
         NVMTLTexture *tgt = _target; NSUInteger W = tgt.width, H = tgt.height, bpp = 4;
         pthread_mutex_lock(&gNvgfxRbMu); if (!gNvgfxRbSeen) gNvgfxRbSeen = [NSMutableSet new]; NSValue *rk = [NSValue valueWithPointer:(__bridge void *)tgt];
-        BOOL first = ![gNvgfxRbSeen containsObject:rk] && gNvgfxRbSeen.count < 24; if (first) [gNvgfxRbSeen addObject:rk]; pthread_mutex_unlock(&gNvgfxRbMu);
+        BOOL first = gNvgfxRbSeen.count < 48; [gNvgfxRbSeen addObject:rk]; pthread_mutex_unlock(&gNvgfxRbMu);   // N-106: per pass, not per target (label passes share textures)
         if (first && tgt.pixelFormat == MTLPixelFormatBGRA8Unorm && W * H * bpp <= 2048 * 1024 && atomic_fetch_add(&nrb, 1) < 24) {
             id<MTLBuffer> rb = [[_cb device] newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
             id<MTLBlitCommandEncoder> bl = [_cb blitCommandEncoder];
             [bl copyFromTexture:tgt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:W * bpp destinationBytesPerImage:W * H * bpp];
             [bl endEncoding];
             unsigned long fmt = (unsigned long)tgt.pixelFormat; const char *label = tgt.label.UTF8String ?: "";
-            NSString *lab = @(label);
+            NSString *lab = @(label); void *encp = (__bridge void *)self;
             [_cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
                 const uint8_t *p = rb.contents; size_t n = W * H * bpp, nz = 0; for (size_t k = 0; k < n; k++) if (p[k]) nz++;
-                nvgfx_wstrace("TGT READBACK %p %lux%lu fmt %lu label '%s' status %ld nonzero %zu/%zu", (__bridge void *)tgt, (unsigned long)W, (unsigned long)H, fmt, lab.UTF8String, (long)c.status, nz, n);
+                nvgfx_wstrace("TGT READBACK %p %lux%lu fmt %lu label '%s' status %ld nonzero %zu/%zu enc %p", (__bridge void *)tgt, (unsigned long)W, (unsigned long)H, fmt, lab.UTF8String, (long)c.status, nz, n, encp);
                 for (NSUInteger r = 0; r < H; r++) { const uint8_t *row = p + r * W * bpp;   // two lines per row for 128 px wide BGRA
                     for (NSUInteger half = 0; half < 2; half++) { char hx[600]; size_t k = 0; NSUInteger from = half * (W * bpp / 2), to = half ? W * bpp : W * bpp / 2;
                         for (NSUInteger c2 = from; c2 < to && k + 3 < sizeof hx; c2++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", row[c2]);
