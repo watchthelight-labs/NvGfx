@@ -835,6 +835,10 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
 
 static char nvmtl_surface_cache_key;
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)surf plane:(NSUInteger)plane {
+    if (nvgfx_wstrace_on() && surf) { static _Atomic unsigned nst;   // N-94: which IOSurfaces WindowServer wraps (window capture, SDF sources)
+        nvgfx_wstrace_n(&nst, 300, "SURFTEX surface %u plane %lu %lux%lu fmt %lu pitch %zu planes %zu usage %lu", (unsigned)IOSurfaceGetID(surf), (unsigned long)plane,
+                        (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat, IOSurfaceGetBytesPerRowOfPlane(surf, (size_t)plane),
+                        IOSurfaceGetPlaneCount(surf), (unsigned long)d.usage); }
     @synchronized(self) {
         NSMapTable *cache = objc_getAssociatedObject(self, &nvmtl_surface_cache_key);
         if (!cache) { cache = [NSMapTable strongToWeakObjectsMapTable];
@@ -1691,10 +1695,11 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 
 - (id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor *)sd {
     if (nvmtl_vk_init()) return nil;
-    nvgfx_wstrace("sampler '%s' min %lu mag %lu mip %lu norm %d addr %lu/%lu aniso %lu lod %.2f..%.2f argbuf %d",
+    { static _Atomic unsigned nsamp;
+      nvgfx_wstrace_n(&nsamp, 200, "sampler '%s' min %lu mag %lu mip %lu norm %d addr %lu/%lu aniso %lu lod %.2f..%.2f argbuf %d",
                   sd.label.UTF8String ?: "", (unsigned long)sd.minFilter, (unsigned long)sd.magFilter, (unsigned long)sd.mipFilter,
                   (int)sd.normalizedCoordinates, (unsigned long)sd.sAddressMode, (unsigned long)sd.tAddressMode,
-                  (unsigned long)sd.maxAnisotropy, sd.lodMinClamp, sd.lodMaxClamp, (int)sd.supportArgumentBuffers);
+                  (unsigned long)sd.maxAnisotropy, sd.lodMinClamp, sd.lodMaxClamp, (int)sd.supportArgumentBuffers); }
     NVMTLSamplerState *s = [NVMTLSamplerState new];
     s->_label = [sd.label copy];
     if (!sd.normalizedCoordinates) {

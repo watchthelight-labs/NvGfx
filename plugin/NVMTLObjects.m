@@ -1270,6 +1270,7 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
         r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, seed);
         if (dirtied && marked > 0) nvmtl_surface_remark_later(r, seed);
         static unsigned nd; if (nd++ < 6 || nd % 5000 == 0) nvlog("surface-out -> dirty, no copy (%ux%u surface %u seed %u, #%u)", r->_i.w, r->_i.h, (unsigned)IOSurfaceGetID(r->_surf), seed, nd);
+        { static _Atomic unsigned nso; nvgfx_wstrace_n(&nso, 400, "SURFOUT dirty-mark surface %u %ux%u fmt %lu seed %u", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h, (unsigned long)r.pixelFormat, seed); }
         return YES;
     }
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
@@ -1366,6 +1367,10 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     return nil; }
 - (void)getBytes:(void *)bytes bytesPerRow:(NSUInteger)row fromRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level {
     if (level >= [self mipmapLevelCount]) { nvlog("getBytes: mip level %lu — this texture has %lu", (unsigned long)level, (unsigned long)[self mipmapLevelCount]); return; }
+    if (nvgfx_wstrace_on()) { NVMTLTexture *tr = _parent ?: self; static _Atomic unsigned ng;   // N-94: window capture readbacks
+        if ((tr->_surf || region.size.width >= 256) && atomic_fetch_add(&ng, 1) < 300)
+            nvgfx_wstrace("GETBYTES %lux%lu of %ux%u fmt %lu surf %u%s", (unsigned long)region.size.width, (unsigned long)region.size.height, [self nvi]->w, [self nvi]->h,
+                          (unsigned long)self.pixelFormat, tr->_surf ? (unsigned)IOSurfaceGetID(tr->_surf) : 0u, tr->_vramOn ? " vram" : ""); }
     [self nvmtlSurfaceIn];
     nvmtl_census("getBytes", (uint32_t)region.size.width, (uint32_t)region.size.height, _surf != NULL);
     if (nvmtl_vk_image_read_region_level_layer(_q, [self nvi], (uint8_t *)bytes, row, (uint32_t)region.origin.x, (uint32_t)region.origin.y,
@@ -2732,6 +2737,47 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                         nvgfx_wstrace("CAP NOISE row %d (R,A per texel): %s", r, hx); }
                 }
                 objc_setAssociatedObject(self, NVGFX_CAP_KEY, @1, OBJC_ASSOCIATION_RETAIN);
+            }
+        }
+    }
+    if (nvgfx_wstrace_on() && _ps->_fname && ([_ps->_fname hasPrefix:@"sdf_"] || [_ps->_fname hasPrefix:@"glass_"])) {
+        // N-94: the Dock badge digit is a CoreAnimation SDF element (CASDFElementLayer, contents mode). Log every SDF generator and
+        // glass draw with its target, bound textures, blend state, function constants and uniforms; dump small source textures once.
+        static _Atomic unsigned nsdf;
+        if (atomic_fetch_add(&nsdf, 1) < 400) {
+            NSDictionary *ft = objc_getAssociatedObject(self, NVGFX_FTEX_KEY), *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
+            NSDictionary *fsd = objc_getAssociatedObject(self, NVGFX_FSAMP_KEY);
+            NVMTLTexture *tr = _target ? (_target->_parent ?: _target) : nil;
+            id ffn = _ps->_descriptor.fragmentFunction; NSDictionary *fc = [ffn isKindOfClass:[NVMTLFunction class]] ? ((NVMTLFunction *)ffn)->_fc : nil;
+            NSData *fj = fc ? [NSJSONSerialization dataWithJSONObject:fc options:NSJSONWritingSortedKeys error:NULL] : nil;
+            static _Atomic unsigned long sseq; unsigned long sq = atomic_fetch_add(&sseq, 1);
+            nvgfx_wstrace("SDF draw %lu fs %s vs %s target %ux%u fmt %lu surf %u label '%s' | blend %s | ftex %s | samplers %s", sq, _ps->_fname.UTF8String, _ps->_vname.UTF8String,
+                          _target ? [_target nvi]->w : 0u, _target ? [_target nvi]->h : 0u, _target ? (unsigned long)_target.pixelFormat : 0ul,
+                          tr && tr->_surf ? (unsigned)IOSurfaceGetID(tr->_surf) : 0u, _target.label.UTF8String ?: "", _ps->_blend.UTF8String ?: "-",
+                          ft ? [[[ft description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String] : "-",
+                          fsd ? [[[fsd description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String] : "-");
+            if (fj) { NSString *fs2 = [[NSString alloc] initWithData:fj encoding:NSUTF8StringEncoding];
+                for (NSUInteger o = 0; o < fs2.length; o += 600)
+                    nvgfx_wstrace("SDF %lu FC +%lu: %s", sq, (unsigned long)o, [fs2 substringWithRange:NSMakeRange(o, MIN((NSUInteger)600, fs2.length - o))].UTF8String); }
+            for (unsigned i = 0; i <= 6; i++) nvgfx_cap_hex("SDF FBUF", _fbufAt, i, 320);
+            static NSMutableSet *dumped; static pthread_mutex_t smu = PTHREAD_MUTEX_INITIALIZER;
+            for (NSNumber *slot in fo) {
+                id<MTLTexture> bt = fo[slot]; size_t W = bt.width, H = bt.height; unsigned long pf = (unsigned long)bt.pixelFormat;
+                unsigned bpp = pf == 1 || pf == 10 || pf == 11 || pf == 13 ? 1 : pf == 25 || pf == 30 ? 2 : pf == 55 || pf == 65 || pf == 70 || pf == 80 || pf == 81 ? 4 : pf == 115 ? 8 : 0;
+                if (!bpp || W > 512 || H > 512) continue;
+                pthread_mutex_lock(&smu); if (!dumped) dumped = [NSMutableSet new];
+                NSValue *tk = [NSValue valueWithPointer:(__bridge void *)bt]; BOOL first = ![dumped containsObject:tk] && dumped.count < 60; if (first) [dumped addObject:tk];
+                pthread_mutex_unlock(&smu);
+                if (!first) continue;
+                uint8_t *px = (uint8_t *)calloc(W * H, bpp); if (!px) continue;
+                [bt getBytes:px bytesPerRow:W * bpp fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+                size_t nz = 0; for (size_t k = 0; k < W * H * bpp; k++) if (px[k]) nz++;
+                nvgfx_wstrace("SDF %lu TEX slot %d %p %zux%zu fmt %lu bpp %u nonzero bytes %zu/%zu", sq, slot.intValue, (__bridge void *)bt, W, H, pf, bpp, nz, W * H * bpp);
+                size_t step = W / 160 ? W / 160 : 1, rstep = H / 4 ? H / 4 : 1;
+                for (size_t r = rstep; r < H; r += rstep) { char hx[1400]; size_t k = 0;
+                    for (size_t c = 0; c < W && k + 2 * bpp + 1 < sizeof hx; c += step) for (unsigned b = 0; b < bpp; b++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", px[(r * W + c) * bpp + b]);
+                    nvgfx_wstrace("SDF %lu TEX %p row %zu step %zu: %s", sq, (__bridge void *)bt, r, step, hx); }
+                free(px);
             }
         }
     }
@@ -4721,6 +4767,11 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
        destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dof {
     NVMTLTexture *s = (NVMTLTexture *)src, *d = (NVMTLTexture *)dst;
     if (!s || !d) { nvlog("blit copyFromTexture: nil"); return; }
+    if (nvgfx_wstrace_on()) { NVMTLTexture *sr = s->_parent ?: s, *dr = d->_parent ?: d; static _Atomic unsigned nb;   // N-94: window capture copies
+        if ((sr->_surf || dr->_surf || size.width >= 256) && atomic_fetch_add(&nb, 1) < 300)
+            nvgfx_wstrace("BLIT T2T %lux%lu src %ux%u fmt %lu surf %u%s -> dst %ux%u fmt %lu surf %u%s label '%s'", (unsigned long)size.width, (unsigned long)size.height,
+                          [s nvi]->w, [s nvi]->h, (unsigned long)s.pixelFormat, sr->_surf ? (unsigned)IOSurfaceGetID(sr->_surf) : 0u, sr->_vramOn ? " vram" : "",
+                          [d nvi]->w, [d nvi]->h, (unsigned long)d.pixelFormat, dr->_surf ? (unsigned)IOSurfaceGetID(dr->_surf) : 0u, dr->_vramOn ? " vram" : "", d.label.UTF8String ?: ""); }
     if (sl >= s.mipmapLevelCount || dl >= d.mipmapLevelCount || ss >= nvmtl_texture_slice_count(s) || ds >= nvmtl_texture_slice_count(d)) {
         nvlog("blit copyFromTexture: subresource outside view"); return;
     }
@@ -4853,6 +4904,11 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
 destinationBytesPerImage:(NSUInteger)img {
     NVMTLTexture *t = (NVMTLTexture *)src; NVMTLBuffer *b = (NVMTLBuffer *)dst;
     if (!t || !b) { nvlog("blit copyFromTexture:toBuffer: nil"); return; }
+    if (nvgfx_wstrace_on()) { NVMTLTexture *sr = t->_parent ?: t; static _Atomic unsigned nb2;   // N-94: window capture readbacks through a buffer
+        if ((sr->_surf || size.width >= 256) && atomic_fetch_add(&nb2, 1) < 300)
+            nvgfx_wstrace("BLIT T2B %lux%lu src %ux%u fmt %lu surf %u%s -> buffer %lu B row %lu", (unsigned long)size.width, (unsigned long)size.height,
+                          [t nvi]->w, [t nvi]->h, (unsigned long)t.pixelFormat, sr->_surf ? (unsigned)IOSurfaceGetID(sr->_surf) : 0u, sr->_vramOn ? " vram" : "",
+                          (unsigned long)b.length, (unsigned long)row); }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:t];
     [_cb->_resources addObject:b];
@@ -4972,11 +5028,20 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     e->_cb = self; e->_target = (NVMTLTexture *)d.colorAttachments[0].texture;
     if (nvgfx_wstrace_on()) {
         id<MTLTexture> t0 = d.colorAttachments[0].texture;
-        static _Atomic unsigned small;
-        if (t0 && t0.width < 1280 && t0.height < 800 && atomic_fetch_add(&small, 1) < 600)
-            nvgfx_wstrace("render pass target %lux%lu fmt %lu level %lu load %lu label '%s'", (unsigned long)t0.width, (unsigned long)t0.height,
-                          (unsigned long)t0.pixelFormat, (unsigned long)d.colorAttachments[0].level, (unsigned long)d.colorAttachments[0].loadAction,
-                          t0.label.UTF8String ?: "");
+        static _Atomic unsigned small, odd;
+        if (t0) {
+            NVMTLTexture *tr = ((NVMTLTexture *)t0)->_parent ? ((NVMTLTexture *)t0)->_parent : (NVMTLTexture *)t0;
+            unsigned long pf = (unsigned long)t0.pixelFormat; const char *lb = t0.label.UTF8String ?: "";
+            // N-94: single-channel, uint and float targets (SDF fields, masks), SDF/capture labels and capture-sized IOSurface
+            // targets are logged at any size; other small targets as before.
+            BOOL oddfmt = pf == 1 || pf == 10 || pf == 11 || pf == 13 || pf == 25 || pf == 30 || pf == 55 || pf == 65 || pf == 115;
+            BOOL oddlbl = strcasestr(lb, "sdf") || strcasestr(lb, "capture") || strcasestr(lb, "offscreen") || strcasestr(lb, "iosurface") || strcasestr(lb, "scratch");
+            BOOL big = t0.width >= 1280 || t0.height >= 800;
+            if ((oddfmt || oddlbl || (big && tr->_surf)) ? atomic_fetch_add(&odd, 1) < 800 : (!big && atomic_fetch_add(&small, 1) < 600))
+                nvgfx_wstrace("render pass target %lux%lu fmt %lu level %lu load %lu store %lu surf %u%s label '%s'", (unsigned long)t0.width, (unsigned long)t0.height, pf,
+                              (unsigned long)d.colorAttachments[0].level, (unsigned long)d.colorAttachments[0].loadAction, (unsigned long)d.colorAttachments[0].storeAction,
+                              tr->_surf ? (unsigned)IOSurfaceGetID(tr->_surf) : 0u, tr->_vramOn ? " vram" : "", lb);
+        }
     }
     if (!_resources) _resources = [NVMTLResSet new];
     if (e->_target) [_resources addObject:e->_target];
