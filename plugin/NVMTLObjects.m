@@ -2780,8 +2780,11 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                         for (size_t c = 0; c < W * bpp && k + 3 < sizeof hx; c += cstep) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", px[r * W * bpp + c]);
                         nvgfx_wstrace("OFFS GLYPH %p row %zu: %s", (__bridge void *)bt, r, hx); }
                     free(px); }
-                nvgfx_cap_hex("OFFS VBUF", _vbufAt, 1, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 0, 96);
-                for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS FBUF", _fbufAt, i, 256);
+                nvgfx_cap_hex("OFFS VBUF", _vbufAt, 1, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 0, 192);
+                for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS FBUF", _fbufAt, i, 512);
+                { NSDictionary *fsd = objc_getAssociatedObject(self, NVGFX_FSAMP_KEY);
+                  nvgfx_wstrace("OFFS GLYPH samplers %s", fsd ? [[[fsd description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String] : "-"); }
+                objc_setAssociatedObject(self, NVGFX_CAP_KEY, @1, OBJC_ASSOCIATION_RETAIN);   // the draw logger records this draw's indices
             }
         }
     }
