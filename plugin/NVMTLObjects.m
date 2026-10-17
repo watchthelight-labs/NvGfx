@@ -2624,6 +2624,8 @@ static const void *NVGFX_FTEX_KEY = &NVGFX_FTEX_KEY;
 static const void *NVGFX_FSAMP_KEY = &NVGFX_FSAMP_KEY;
 static const void *NVGFX_CAP_KEY = &NVGFX_CAP_KEY;
 static const void *NVGFX_TGTRB_KEY = &NVGFX_TGTRB_KEY;   // N-103: the pass that drew a glyph: read its target back at completion
+static NSMutableSet *gNvgfxRbSeen; static pthread_mutex_t gNvgfxRbMu = PTHREAD_MUTEX_INITIALIZER;   // targets read back so far (N-104: chained)
+static BOOL nvgfx_rb_contains(id tex) { pthread_mutex_lock(&gNvgfxRbMu); BOOL r = gNvgfxRbSeen && [gNvgfxRbSeen containsObject:[NSValue valueWithPointer:(__bridge void *)tex]]; pthread_mutex_unlock(&gNvgfxRbMu); return r; }
 static const void *NVGFX_FTOBJ_KEY = &NVGFX_FTOBJ_KEY;   // bound fragment textures (objects), for the N-83 capture   // set when the next draw call should be logged (N-83 capture)
 // N-83: hex dump of a CPU-visible bound buffer, 96 bytes per syslog line
 static void nvgfx_cap_hex(const char *tag, NSDictionary *at, unsigned idx, size_t want)
@@ -2763,6 +2765,10 @@ static BOOL nvgfx_ws_interesting(NSString *n)
             // N-99: for draws that sample a small A8 or RG8 texture (glyph masks, the badge digit): the texture's bytes, its
             // swizzle and backing, the vertex bytes (colour attribute) and the first uniform buffers.
             NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
+            for (NSNumber *slot in fo) if (nvgfx_rb_contains(fo[slot])) {   // N-104: this pass consumes a target we read back: read this one back too
+                objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
+                nvgfx_wstrace("OFFS CHAIN enc %p samples read-back target %p at slot %d -> target %ux%u fmt %lu label '%s'", (__bridge void *)self, (__bridge void *)fo[slot], slot.intValue,
+                              [_target nvi]->w, [_target nvi]->h, (unsigned long)_target.pixelFormat, _target.label.UTF8String ?: ""); break; }
             static NSMutableSet *gseen; static pthread_mutex_t gmu = PTHREAD_MUTEX_INITIALIZER;
             for (NSNumber *slot in fo) {
                 NVMTLTexture *bt = fo[slot]; unsigned long pf = (unsigned long)bt.pixelFormat; size_t W = bt.width, H = bt.height;
@@ -3387,11 +3393,11 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
         // N-103: the label pass that drew a glyph texture: copy its colour target into a shared buffer now (the pass is
         // closed, the command buffer is still open) and log the pixels once the GPU has finished. Once per target.
         objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
-        static NSMutableSet *rseen; static pthread_mutex_t rmu = PTHREAD_MUTEX_INITIALIZER; static _Atomic unsigned nrb;
+        static _Atomic unsigned nrb;
         NVMTLTexture *tgt = _target; NSUInteger W = tgt.width, H = tgt.height, bpp = 4;
-        pthread_mutex_lock(&rmu); if (!rseen) rseen = [NSMutableSet new]; NSValue *rk = [NSValue valueWithPointer:(__bridge void *)tgt];
-        BOOL first = ![rseen containsObject:rk] && rseen.count < 8; if (first) [rseen addObject:rk]; pthread_mutex_unlock(&rmu);
-        if (first && W * H * bpp <= 256 * 1024 && atomic_fetch_add(&nrb, 1) < 8) {
+        pthread_mutex_lock(&gNvgfxRbMu); if (!gNvgfxRbSeen) gNvgfxRbSeen = [NSMutableSet new]; NSValue *rk = [NSValue valueWithPointer:(__bridge void *)tgt];
+        BOOL first = ![gNvgfxRbSeen containsObject:rk] && gNvgfxRbSeen.count < 24; if (first) [gNvgfxRbSeen addObject:rk]; pthread_mutex_unlock(&gNvgfxRbMu);
+        if (first && tgt.pixelFormat == MTLPixelFormatBGRA8Unorm && W * H * bpp <= 2048 * 1024 && atomic_fetch_add(&nrb, 1) < 24) {
             id<MTLBuffer> rb = [[_cb device] newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
             id<MTLBlitCommandEncoder> bl = [_cb blitCommandEncoder];
             [bl copyFromTexture:tgt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:W * bpp destinationBytesPerImage:W * H * bpp];
