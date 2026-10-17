@@ -2703,6 +2703,21 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                                   _hasVP ? "" : "(default) ", _vp[0], _vp[1], _vp[2], _vp[3], _hasSC ? "" : "(default) ", _sc[0], _sc[1], _sc[2], _sc[3],
                                   tw0, _target ? [_target nvi]->h : 0u, (_target->_parent ?: _target)->_surf ? (unsigned)IOSurfaceGetID((_target->_parent ?: _target)->_surf) : 0u, (unsigned)_cb->_nEnd);
                     if (vx >= 0 && vy >= 0 && !objc_getAssociatedObject(self, NVGFX_DISPRB_KEY)) objc_setAssociatedObject(self, NVGFX_DISPRB_KEY, @[@(vx), @(vy)], OBJC_ASSOCIATION_RETAIN);
+                    // N-119: everything an offline replay of this composite needs: constants, blend, vertices, matrices, uniforms, indices
+                    if (W >= 100 || H >= 100) {
+                        id ffn2 = _ps->_descriptor.fragmentFunction, vfn2 = _ps->_descriptor.vertexFunction;
+                        NSDictionary *fcd = [ffn2 isKindOfClass:[NVMTLFunction class]] ? ((NVMTLFunction *)ffn2)->_fc : nil, *vcd = [vfn2 isKindOfClass:[NVMTLFunction class]] ? ((NVMTLFunction *)vfn2)->_fc : nil;
+                        NSData *fj = fcd ? [NSJSONSerialization dataWithJSONObject:fcd options:NSJSONWritingSortedKeys error:NULL] : nil, *vj = vcd ? [NSJSONSerialization dataWithJSONObject:vcd options:NSJSONWritingSortedKeys error:NULL] : nil;
+                        MTLRenderPipelineColorAttachmentDescriptor *ca0 = _ps->_descriptor.colorAttachments[0];
+                        nvgfx_wstrace("COMP FC enc %p fs %s vfc %s", (__bridge void *)self, fj ? [[[[NSString alloc] initWithData:fj encoding:NSUTF8StringEncoding] stringByReplacingOccurrencesOfString:@"\":[0]" withString:@"\":0"] UTF8String] : "-",
+                                      vj ? [[[[NSString alloc] initWithData:vj encoding:NSUTF8StringEncoding] stringByReplacingOccurrencesOfString:@"\":[0]" withString:@"\":0"] UTF8String] : "-");
+                        nvgfx_wstrace("COMP BLEND enc %p blend %d rgb(%lu,%lu,op %lu) a(%lu,%lu,op %lu) mask %lu fmt %lu", (__bridge void *)self, ca0.blendingEnabled,
+                                      (unsigned long)ca0.sourceRGBBlendFactor, (unsigned long)ca0.destinationRGBBlendFactor, (unsigned long)ca0.rgbBlendOperation, (unsigned long)ca0.sourceAlphaBlendFactor,
+                                      (unsigned long)ca0.destinationAlphaBlendFactor, (unsigned long)ca0.alphaBlendOperation, (unsigned long)ca0.writeMask, (unsigned long)ca0.pixelFormat);
+                        for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("COMP VBUF", _vbufAt, i, i == 1 ? 384 : 64);
+                        for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("COMP FBUF", _fbufAt, i, 512);
+                        objc_setAssociatedObject(self, NVGFX_CAP_KEY, @YES, OBJC_ASSOCIATION_RETAIN);   // the draw call itself (indices) follows in CAP draw
+                    }
                 }
                 id ffn = _ps->_descriptor.fragmentFunction; NSDictionary *fc = [ffn isKindOfClass:[NVMTLFunction class]] ? ((NVMTLFunction *)ffn)->_fc : nil;
                 NSData *fj2 = fc ? [NSJSONSerialization dataWithJSONObject:fc options:NSJSONWritingSortedKeys error:NULL] : nil;
