@@ -2705,8 +2705,15 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 // glyph) in the Dock band; the 128 px scratch offscreen chased before belongs to the menu bar (N-121).
                 const BOOL dock = sy > 1400.f && W <= 64 && H <= 64;
                 uint64_t sinceLabel = ~0ull; { uint64_t t0 = atomic_load(&gNvgfxLabelNs); if (t0) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); sinceLabel = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - t0; } }
-                const BOOL comp = dock || (nvgfx_rb_contains(bt) && sinceLabel < 400000000ull);
-                if (comp) { if (atomic_fetch_add(&ncompdraw, 1) >= 120) continue; }
+                BOOL comp = dock || (nvgfx_rb_contains(bt) && sinceLabel < 400000000ull);
+                // N-123: the Dock composites the same few small tiles every frame; one record per (size, format, screen cell) per
+                // arming keeps the budget for new things (the badge disc and its digit)
+                if (comp) { static NSMutableSet *ckeys; static _Atomic unsigned ckgen; static pthread_mutex_t ckmu = PTHREAD_MUTEX_INITIALIZER;
+                    { unsigned g_ = atomic_load(&nvgfx_arm_gen); if (atomic_load(&ckgen) != g_) { atomic_store(&ckgen, g_); pthread_mutex_lock(&ckmu); [ckeys removeAllObjects]; pthread_mutex_unlock(&ckmu); } }
+                    NSString *ck = [NSString stringWithFormat:@"%zux%zu/%lu@%d,%d", W, H, (unsigned long)bt.pixelFormat, (int)(sx / 16.f), (int)(sy / 16.f)];
+                    pthread_mutex_lock(&ckmu); if (!ckeys) ckeys = [NSMutableSet new]; BOOL seen = [ckeys containsObject:ck]; if (!seen) [ckeys addObject:ck]; pthread_mutex_unlock(&ckmu);
+                    if (seen) comp = NO; }
+                if (comp) { if (atomic_fetch_add(&ncompdraw, 1) >= 200) continue; }
                 else { if (W < 16 || W > 160 || H < 16 || H > 160 || (W > H ? W - H : H - W) > 8 || atomic_load(&nbadge) >= 300) continue; atomic_fetch_add(&nbadge, 1); }
                 if (comp) {
                     nvgfx_wstrace("COMP draw enc %p fs %s tex %p %zux%zu fmt %lu %s fetch mask %#x zero %#x vertex0 %.1f %.1f screen %.1f %.1f vp %s%.4g %.4g %.4g %.4g sc %s%u %u %u %u target %ux%u surf %u nEnd %u",
@@ -2725,6 +2732,14 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                         nvgfx_wstrace("COMP BLEND enc %p blend %d rgb(%lu,%lu,op %lu) a(%lu,%lu,op %lu) mask %lu fmt %lu", (__bridge void *)self, ca0.blendingEnabled,
                                       (unsigned long)ca0.sourceRGBBlendFactor, (unsigned long)ca0.destinationRGBBlendFactor, (unsigned long)ca0.rgbBlendOperation, (unsigned long)ca0.sourceAlphaBlendFactor,
                                       (unsigned long)ca0.destinationAlphaBlendFactor, (unsigned long)ca0.alphaBlendOperation, (unsigned long)ca0.writeMask, (unsigned long)ca0.pixelFormat);
+                        if (W <= 64 && H <= 64) {   // N-123: the sampled tile itself (A8 1 B/px, BGRA 4, RGBA16F 8), every row
+                            unsigned bpp2 = bt.pixelFormat == MTLPixelFormatA8Unorm ? 1 : bt.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : 4;
+                            uint8_t *tp = (uint8_t *)calloc(W * H, bpp2);
+                            if (tp) { [bt getBytes:tp bytesPerRow:W * bpp2 fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+                                for (size_t r = 0; r < H; r++) { char hx[700]; size_t k = 0;
+                                    for (size_t c = 0; c < W * bpp2 && k + 3 < sizeof hx; c++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", tp[r * W * bpp2 + c]);
+                                    nvgfx_wstrace("COMP TEX %p row %zu: %s", (__bridge void *)bt, r, hx); }
+                                free(tp); } }
                         for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("COMP VBUF", _vbufAt, i, i == 1 ? 384 : 64);
                         for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("COMP FBUF", _fbufAt, i, 512);
                         objc_setAssociatedObject(self, NVGFX_CAP_KEY, @YES, OBJC_ASSOCIATION_RETAIN);   // the draw call itself (indices) follows in CAP draw
