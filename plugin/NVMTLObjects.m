@@ -2625,6 +2625,7 @@ static const void *NVGFX_FSAMP_KEY = &NVGFX_FSAMP_KEY;
 static const void *NVGFX_CAP_KEY = &NVGFX_CAP_KEY;
 static const void *NVGFX_TGTRB_KEY = &NVGFX_TGTRB_KEY;   // N-103: the pass that drew a glyph: read its target back at completion
 static const void *NVGFX_GLYRB_KEY = &NVGFX_GLYRB_KEY;   // N-105: glyph textures sampled by this pass, read back from the GPU at completion
+static const void *NVGFX_BUFRB_KEY = &NVGFX_BUFRB_KEY;   // N-107: (name, buffer, offset) of the glyph draw's uniform/vertex buffers, read back at completion
 static NSMutableSet *gNvgfxRbSeen; static pthread_mutex_t gNvgfxRbMu = PTHREAD_MUTEX_INITIALIZER;   // targets read back so far (N-104: chained)
 static BOOL nvgfx_rb_contains(id tex) { pthread_mutex_lock(&gNvgfxRbMu); BOOL r = gNvgfxRbSeen && [gNvgfxRbSeen containsObject:[NSValue valueWithPointer:(__bridge void *)tex]]; pthread_mutex_unlock(&gNvgfxRbMu); return r; }
 static const void *NVGFX_FTOBJ_KEY = &NVGFX_FTOBJ_KEY;   // bound fragment textures (objects), for the N-83 capture   // set when the next draw call should be logged (N-83 capture)
@@ -2795,7 +2796,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 if (px) { [bt getBytes:px bytesPerRow:W * bpp fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
                     size_t nz = 0; for (size_t k = 0; k < W * H * bpp; k++) if (px[k]) nz++;
                     nvgfx_wstrace("OFFS GLYPH %p nonzero %zu/%zu", (__bridge void *)bt, nz, W * H * bpp);
-                    size_t rstep = H / 6 ? H / 6 : 1, cstep = W * bpp > 300 ? (W * bpp) / 300 : 1;
+                    size_t rstep = (W * bpp <= 300 && H <= 64) ? 1 : (H / 6 ? H / 6 : 1), cstep = W * bpp > 300 ? (W * bpp) / 300 : 1;   // N-107: every row of a small glyph
                     for (size_t r = rstep; r < H; r += rstep) { char hx[700]; size_t k = 0;
                         for (size_t c = 0; c < W * bpp && k + 3 < sizeof hx; c += cstep) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", px[r * W * bpp + c]);
                         nvgfx_wstrace("OFFS GLYPH %p row %zu: %s", (__bridge void *)bt, r, hx); }
@@ -2803,7 +2804,9 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 nvgfx_cap_hex("OFFS VBUF", _vbufAt, 1, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 0, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 2, 64); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 3, 64);   // N-102: mvp and texture_matrix too
                 if (pf == 1 || pf == 30) { objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, @YES, OBJC_ASSOCIATION_RETAIN);   // N-103: read the target back when this pass ends
                     NSMutableArray *gl = objc_getAssociatedObject(self, NVGFX_GLYRB_KEY); if (!gl) { gl = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_GLYRB_KEY, gl, OBJC_ASSOCIATION_RETAIN); }
-                    [gl addObject:bt]; }   // N-105: and the glyph texture's GPU-side bytes (the dump above reads the CPU shadow)
+                    [gl addObject:bt];
+                    NSMutableArray *br = objc_getAssociatedObject(self, NVGFX_BUFRB_KEY); if (!br) { br = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_BUFRB_KEY, br, OBJC_ASSOCIATION_RETAIN); }
+                    if (br.count < 6) { NSArray *e; if ((e = _fbufAt[@1])) [br addObject:@[@"FBUF1", e[0], e[1]]]; if ((e = _fbufAt[@2])) [br addObject:@[@"FBUF2", e[0], e[1]]]; if ((e = _vbufAt[@1])) [br addObject:@[@"VBUF1", e[0], e[1]]]; } }   // N-107: the GPU-side bytes of this draw's buffers
                 for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS FBUF", _fbufAt, i, 512);
                 { NSDictionary *fsd = objc_getAssociatedObject(self, NVGFX_FSAMP_KEY);
                   nvgfx_wstrace("OFFS GLYPH samplers %s", fsd ? [[[fsd description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String] : "-"); }
@@ -3395,6 +3398,16 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (_dumpPso) { _dumpPso = NO; [self nvmtlDumpBoundFragmentBuffers]; }
     [self nvmtlCloseVisibility];
     if (_begun) nvmtl_vk_cmd_end_render(&_cb->_c);
+    { NSArray *br = objc_getAssociatedObject(self, NVGFX_BUFRB_KEY);
+      if (br.count && nvgfx_wstrace_on()) { objc_setAssociatedObject(self, NVGFX_BUFRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
+        for (NSArray *e in br) { NSString *name = e[0]; NVMTLBuffer *src = e[1]; NSUInteger off = [e[2] unsignedLongValue]; NSUInteger len = 512;
+            if (off >= src.length) continue; if (off + len > src.length) len = src.length - off;
+            id<MTLBuffer> rb = [[_cb device] newBufferWithLength:len options:MTLResourceStorageModeShared];
+            id<MTLBlitCommandEncoder> bl = [_cb blitCommandEncoder]; [bl copyFromBuffer:src sourceOffset:off toBuffer:rb destinationOffset:0 size:len]; [bl endEncoding];
+            void *encp = (__bridge void *)self;
+            [_cb addCompletedHandler:^(id<MTLCommandBuffer> c) { const uint8_t *p = rb.contents;
+                for (NSUInteger o = 0; o < len; o += 96) { char hx[200]; size_t k = 0; for (NSUInteger j = o; j < len && j < o + 96; j++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", p[j]);
+                    nvgfx_wstrace("GPU %s enc %p +%lu/%lu: %s", name.UTF8String, encp, (unsigned long)o, (unsigned long)len, hx); } }]; } } }
     { NSArray *gl = objc_getAssociatedObject(self, NVGFX_GLYRB_KEY);
       if (gl.count && nvgfx_wstrace_on()) { objc_setAssociatedObject(self, NVGFX_GLYRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
         for (NVMTLTexture *gt in gl) { NSUInteger W = gt.width, H = gt.height, bpp = gt.pixelFormat == MTLPixelFormatA8Unorm ? 1 : gt.pixelFormat == MTLPixelFormatRG8Unorm ? 2 : 4;
