@@ -2757,10 +2757,16 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                           [fs2 substringToIndex:MIN((NSUInteger)300, fs2.length)].UTF8String);
             // N-99: for draws that sample a small A8 or RG8 texture (glyph masks, the badge digit): the texture's bytes, its
             // swizzle and backing, the vertex bytes (colour attribute) and the first uniform buffers.
-            NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY); static _Atomic unsigned nglyph;
+            NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
+            static NSMutableSet *gseen; static pthread_mutex_t gmu = PTHREAD_MUTEX_INITIALIZER;
             for (NSNumber *slot in fo) {
                 NVMTLTexture *bt = fo[slot]; unsigned long pf = (unsigned long)bt.pixelFormat; size_t W = bt.width, H = bt.height;
-                if (!(pf == 1 || pf == 30) || W > 256 || H > 256 || atomic_fetch_add(&nglyph, 1) >= 40) continue;
+                if (!(pf == 1 || pf == 30) || W > 256 || H > 256) continue;
+                // once per texture object (the clock text redraws every second and would eat any per-draw budget)
+                pthread_mutex_lock(&gmu); if (!gseen) gseen = [NSMutableSet new];
+                NSValue *gk = [NSValue valueWithPointer:(__bridge void *)bt]; BOOL gfirst = ![gseen containsObject:gk] && gseen.count < 200; if (gfirst) [gseen addObject:gk];
+                pthread_mutex_unlock(&gmu);
+                if (!gfirst) continue;
                 NVMTLTexture *rt = bt->_parent ?: bt; unsigned bpp = pf == 1 ? 1 : 2;
                 nvgfx_wstrace("OFFS GLYPH enc %p slot %d %p %zux%zu fmt %lu swz %d key %#x view %d surf %u parent %d usage %lu storage %lu", (__bridge void *)self, slot.intValue,
                               (__bridge void *)bt, W, H, pf, rt->_hasSwz, [bt swizzleKey], bt->_swzView != NULL, rt->_surf ? (unsigned)IOSurfaceGetID(rt->_surf) : 0u,
