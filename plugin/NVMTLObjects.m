@@ -2630,6 +2630,25 @@ static NSMutableSet *gNvgfxRbSeen; static pthread_mutex_t gNvgfxRbMu = PTHREAD_M
 static BOOL nvgfx_rb_contains(id tex) { pthread_mutex_lock(&gNvgfxRbMu); BOOL r = gNvgfxRbSeen && [gNvgfxRbSeen containsObject:[NSValue valueWithPointer:(__bridge void *)tex]]; pthread_mutex_unlock(&gNvgfxRbMu); return r; }
 static const void *NVGFX_FTOBJ_KEY = &NVGFX_FTOBJ_KEY;   // bound fragment textures (objects), for the N-83 capture   // set when the next draw call should be logged (N-83 capture)
 // N-83: hex dump of a CPU-visible bound buffer, 96 bytes per syslog line
+// N-114: what a draw's bindings really are (offsets, backing, placement), and what an image really is on the Vulkan
+// side (handles, VkFormat, layout, memory kind). The offline replay has every buffer at offset 0 in its own allocation
+// and every texture as a plain managed image; WindowServer does not, and I-057 only happens there.
+static const char *nvgfx_img_desc(nvk_image *i)
+{
+    static __thread char d[240];
+    if (!i) return "-";
+    snprintf(d, sizeof d, "img %p mem %p view %p vkfmt %u layout %u storage %u placed %d sysmem %u flags %#x usage %#x alloc %zu mtl %u mips %u layers %u",
+             i->img, i->mem, i->view, i->fmt, i->layout, i->storage, i->placed, i->sysmem, i->vkflags, i->usage, i->alloc, i->mtl_type, i->mips, i->layers);
+    return d;
+}
+static void nvgfx_cap_bind(const char *tag, NSDictionary *at, unsigned idx)
+{
+    NSArray *e = at[@(idx)]; if (!e) return;
+    NVMTLBuffer *nb = e[0]; size_t off = [e[1] unsignedLongValue];
+    nvgfx_wstrace("OFFS BIND %s[%u] off %zu size %zu alloc %zu buf %p mem %p map %d shadow %d host %d sysmem %d placed %d imported %d pool %d poff %zu storage %lu heap %d sub %d aliased %d",
+                  tag, idx, off, nb->_b.size, nb->_b.alloc, nb->_b.buf, nb->_b.mem, nb->_b.map != NULL, nb->_shadow.map != NULL, nb->_hostPtr != NULL,
+                  nb->_b.sysmem, nb->_b.placed, nb->_b.imported, nb->_b.pool != NULL, nb->_b.poff, (unsigned long)nb->_storage, nb->_heap != nil, nb->_subHeap != nil, nb->_aliased);
+}
 static void nvgfx_cap_hex(const char *tag, NSDictionary *at, unsigned idx, size_t want)
 {
     NSArray *e = at[@(idx)]; if (!e) return;
@@ -2774,6 +2793,11 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 nvgfx_wstrace("OFFS PASSDRAW enc %p fs %s blend %s", (__bridge void *)self, _ps->_fname.UTF8String, _ps->_blend.UTF8String ?: "-");
                 for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS VBUF", _vbufAt, i, i == 1 ? 1024 : 64);   // N-111: 1024 B for the 16-vertex pill draw
                 for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS FBUF", _fbufAt, i, 512);
+                for (unsigned i = 0; i <= 3; i++) nvgfx_cap_bind("VBUF", _vbufAt, i);
+                for (unsigned i = 0; i <= 3; i++) nvgfx_cap_bind("FBUF", _fbufAt, i);
+                { NVMTLTexture *tr = _target->_parent ?: _target;
+                  nvgfx_wstrace("OFFS TARGET enc %p %p %s heap %d sub %d back %d parent %d surf %u swz %d", (__bridge void *)self, (__bridge void *)_target, nvgfx_img_desc([_target nvi]),
+                                tr->_heap != nil, tr->_subHeap != nil, tr->_backBuf != nil, _target->_parent != nil, tr->_surf ? (unsigned)IOSurfaceGetID(tr->_surf) : 0u, tr->_hasSwz); }
                 objc_setAssociatedObject(self, NVGFX_CAP_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
             }
             for (NSNumber *slot in fo) if (0 && nvgfx_rb_contains(fo[slot])) {   // N-104 chain, off since N-110 (it used up the readback budget)
@@ -2798,6 +2822,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 nvgfx_wstrace("OFFS GLYPH enc %p slot %d %p %zux%zu fmt %lu swz %d key %#x view %d surf %u parent %d usage %lu storage %lu", (__bridge void *)self, slot.intValue,
                               (__bridge void *)bt, W, H, pf, rt->_hasSwz, [bt swizzleKey], bt->_swzView != NULL, rt->_surf ? (unsigned)IOSurfaceGetID(rt->_surf) : 0u,
                               bt->_parent != nil, (unsigned long)bt.usage, (unsigned long)bt.storageMode);
+                nvgfx_wstrace("OFFS GLYPH %p IMAGE %s heap %d sub %d back %d tbview %d", (__bridge void *)bt, nvgfx_img_desc([bt nvi]), rt->_heap != nil, rt->_subHeap != nil, rt->_backBuf != nil, bt->_tbView != NULL);
                 uint8_t *px = (uint8_t *)calloc(W * H, bpp);
                 if (px) { [bt getBytes:px bytesPerRow:W * bpp fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
                     size_t nz = 0; for (size_t k = 0; k < W * H * bpp; k++) if (px[k]) nz++;
@@ -3586,6 +3611,9 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (![self nvmtlBindSamplerPipeline]) return;
     if (nvgfx_wstrace_on() && objc_getAssociatedObject(self, NVGFX_CAP_KEY)) {   // N-83 capture: the draw call itself
         objc_setAssociatedObject(self, NVGFX_CAP_KEY, nil, OBJC_ASSOCIATION_RETAIN);
+        nvgfx_wstrace("OFFS IDX enc %p ib %p off %lu count %lu type %lu base %ld inst %lu size %zu buf %p map %d shadow %d host %d sysmem %d placed %d imported %d pool %d",
+                      (__bridge void *)self, (__bridge void *)b, (unsigned long)off, (unsigned long)count, (unsigned long)it, (long)baseVertex, (unsigned long)instances, b->_b.size, b->_b.buf,
+                      b->_b.map != NULL, b->_shadow.map != NULL, b->_hostPtr != NULL, b->_b.sysmem, b->_b.placed, b->_b.imported, b->_b.pool != NULL);
         char ix[200]; size_t k = 0; const void *ib_ = b->_shadow.map ? b->_shadow.map : (b->_hostPtr ? b->_hostPtr : b->_b.map);
         const uint8_t *ip = ib_ ? (const uint8_t *)ib_ + off : NULL;
         for (unsigned j = 0; ip && j < 24 && j < count; j++)
