@@ -2770,7 +2770,13 @@ static BOOL nvgfx_ws_interesting(NSString *n)
             // N-99: for draws that sample a small A8 or RG8 texture (glyph masks, the badge digit): the texture's bytes, its
             // swizzle and backing, the vertex bytes (colour attribute) and the first uniform buffers.
             NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
-            for (NSNumber *slot in fo) if (nvgfx_rb_contains(fo[slot])) {   // N-104: this pass consumes a target we read back: read this one back too
+            if (objc_getAssociatedObject(self, NVGFX_TGTRB_KEY)) {   // N-110: a flagged pass: every draw after the glyph dumps its inputs for the offline pass replay
+                nvgfx_wstrace("OFFS PASSDRAW enc %p fs %s blend %s", (__bridge void *)self, _ps->_fname.UTF8String, _ps->_blend.UTF8String ?: "-");
+                for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS VBUF", _vbufAt, i, i == 1 ? 192 : 64);
+                for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS FBUF", _fbufAt, i, 512);
+                objc_setAssociatedObject(self, NVGFX_CAP_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
+            }
+            for (NSNumber *slot in fo) if (0 && nvgfx_rb_contains(fo[slot])) {   // N-104 chain, off since N-110 (it used up the readback budget)
                 objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
                 nvgfx_wstrace("OFFS CHAIN enc %p samples read-back target %p at slot %d -> target %ux%u fmt %lu label '%s'", (__bridge void *)self, (__bridge void *)fo[slot], slot.intValue,
                               [_target nvi]->w, [_target nvi]->h, (unsigned long)_target.pixelFormat, _target.label.UTF8String ?: ""); break; }
@@ -3399,7 +3405,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     [self nvmtlCloseVisibility];
     if (_begun) nvmtl_vk_cmd_end_render(&_cb->_c);
     { NSArray *br = objc_getAssociatedObject(self, NVGFX_BUFRB_KEY);
-      if (br.count && nvgfx_wstrace_on()) { objc_setAssociatedObject(self, NVGFX_BUFRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
+      if (0 && br.count && nvgfx_wstrace_on()) {   // N-107 buffer readback, off since N-110 objc_setAssociatedObject(self, NVGFX_BUFRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
         for (NSArray *e in br) { NSString *name = e[0]; NVMTLBuffer *src = e[1]; NSUInteger off = [e[2] unsignedLongValue]; NSUInteger len = 512;
             if (off >= src.length) continue; if (off + len > src.length) len = src.length - off;
             id<MTLBuffer> rb = [[_cb device] newBufferWithLength:len options:MTLResourceStorageModeShared];
@@ -3409,7 +3415,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
                 for (NSUInteger o = 0; o < len; o += 96) { char hx[200]; size_t k = 0; for (NSUInteger j = o; j < len && j < o + 96; j++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", p[j]);
                     nvgfx_wstrace("GPU %s enc %p +%lu/%lu: %s", name.UTF8String, encp, (unsigned long)o, (unsigned long)len, hx); } }]; } } }
     { NSArray *gl = objc_getAssociatedObject(self, NVGFX_GLYRB_KEY);
-      if (gl.count && nvgfx_wstrace_on()) { objc_setAssociatedObject(self, NVGFX_GLYRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
+      if (0 && gl.count && nvgfx_wstrace_on()) {   // N-105 glyph GPU readback, off since N-110 objc_setAssociatedObject(self, NVGFX_GLYRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
         for (NVMTLTexture *gt in gl) { NSUInteger W = gt.width, H = gt.height, bpp = gt.pixelFormat == MTLPixelFormatA8Unorm ? 1 : gt.pixelFormat == MTLPixelFormatRG8Unorm ? 2 : 4;
             if (W * H * bpp > 64 * 1024) continue;
             id<MTLBuffer> rb = [[_cb device] newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
