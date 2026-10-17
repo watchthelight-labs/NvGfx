@@ -2693,7 +2693,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 NSArray *vb = _vbufAt[@1]; float vx = -1, vy = -1;
                 if (vb) { NVMTLBuffer *nb = vb[0]; size_t off = [vb[1] unsignedLongValue]; const uint8_t *base = nb->_shadow.map ? nb->_shadow.map : (nb->_hostPtr ? nb->_hostPtr : nb->_b.map);
                     if (base && off + 8 <= nb->_b.size) { memcpy(&vx, base + off, 4); memcpy(&vy, base + off + 4, 4); } }
-                const BOOL dock = vy > 1000.f && W <= 160 && H <= 160;
+                const BOOL dock = vy > 1000.f && W <= 160 && H <= 160 && (W >= 100 || H >= 100);   // N-118: label-sized only; icon tiles and 32x32 glass ate the budget in one frame
                 const BOOL comp = dock || nvgfx_rb_contains(bt);
                 if (comp) { if (atomic_fetch_add(&ncompdraw, 1) >= 60) continue; }
                 else { if (W < 16 || W > 160 || H < 16 || H > 160 || (W > H ? W - H : H - W) > 8 || atomic_load(&nbadge) >= 300) continue; atomic_fetch_add(&nbadge, 1); }
@@ -2853,7 +2853,8 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                         nvgfx_wstrace("OFFS GLYPH %p row %zu: %s", (__bridge void *)bt, r, hx); }
                     free(px); }
                 nvgfx_cap_hex("OFFS VBUF", _vbufAt, 1, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 0, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 2, 64); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 3, 64);   // N-102: mvp and texture_matrix too
-                if ([_target nvi]->w <= 256 && [_target nvi]->h <= 384 && ((pf == 30 && W <= 64) || (pf == 80 && W <= 64 && H <= 64))) {   // N-117: badge-like passes only (pill or small glyph into a small offscreen) objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, @YES, OBJC_ASSOCIATION_RETAIN);   // N-103: read the target back when this pass ends (N-111: small BGRA glyphs too)
+                // N-117: badge-like passes only (a pill or a small glyph into a small offscreen); N-103: read the target back when this pass ends
+                if ([_target nvi]->w <= 256 && [_target nvi]->h <= 384 && ((pf == 30 && W <= 64) || (pf == 80 && W <= 64 && H <= 64))) { objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
                     NSMutableArray *gl = objc_getAssociatedObject(self, NVGFX_GLYRB_KEY); if (!gl) { gl = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_GLYRB_KEY, gl, OBJC_ASSOCIATION_RETAIN); }
                     [gl addObject:bt];
                     NSMutableArray *br = objc_getAssociatedObject(self, NVGFX_BUFRB_KEY); if (!br) { br = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_BUFRB_KEY, br, OBJC_ASSOCIATION_RETAIN); }
