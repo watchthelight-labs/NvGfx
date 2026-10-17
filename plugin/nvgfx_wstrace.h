@@ -18,7 +18,12 @@ static int nvgfx_wstrace_on(void)
     static int armed = -1, always = 0;
     static _Atomic int live; static _Atomic long checked;
     if (armed < 0) { const char *e = getenv("NVMTL_NVGFX_WSTRACE");
-        armed = e && (e[0] == '1' || e[0] == '2') && getprogname() && !strcmp(getprogname(), "WindowServer"); always = e && e[0] == '2'; }
+#if NVMTL_RELEASE
+        const int here = getprogname() && !strcmp(getprogname(), "WindowServer");   // the release build traces WindowServer only
+#else
+        const int here = 1;   // a debug build traces whichever process loaded it (in-process CARenderer tests)
+#endif
+        armed = e && (e[0] == '1' || e[0] == '2') && here; always = e && e[0] == '2'; }
     if (!armed) return 0;
     if (always) return 1;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);

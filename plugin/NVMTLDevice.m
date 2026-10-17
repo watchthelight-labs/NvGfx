@@ -1343,6 +1343,21 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
     id<MTLFunction> vfn = d.vertexFunction, ffn = d.fragmentFunction;
     nvgfx_wstrace("render pipeline '%s' vs %s fs %s fmt0 %lu blend %d", d.label.UTF8String ?: "", vfn.name.UTF8String ?: "-",
                   ffn.name.UTF8String ?: "-", (unsigned long)d.colorAttachments[0].pixelFormat, (int)d.colorAttachments[0].blendingEnabled);
+    if (nvgfx_wstrace_on() && (access("/tmp/nvmtl-alltex", F_OK) == 0 || access("/Library/GPUBundles/nvmtl/wstrace.alltex", F_OK) == 0)) {   // N-101: the full descriptor, to replay a draw offline
+        NSMutableString *vd = [NSMutableString new]; MTLVertexDescriptor *v = d.vertexDescriptor;
+        if (v) { for (unsigned a = 0; a < 31; a++) if (v.attributes[a].format) [vd appendFormat:@" a%u fmt %lu off %lu buf %lu", a, (unsigned long)v.attributes[a].format, (unsigned long)v.attributes[a].offset, (unsigned long)v.attributes[a].bufferIndex];
+            for (unsigned b = 0; b < 31; b++) if (v.layouts[b].stride) [vd appendFormat:@" | L%u stride %lu step %lu rate %lu", b, (unsigned long)v.layouts[b].stride, (unsigned long)v.layouts[b].stepFunction, (unsigned long)v.layouts[b].stepRate]; }
+        MTLRenderPipelineColorAttachmentDescriptor *c0 = d.colorAttachments[0];
+        nvgfx_wstrace("PIPE '%s' vs %s fs %s | vdesc%s | c0 fmt %lu blend %d rgb %lu/%lu op %lu a %lu/%lu op %lu mask %lu | depth %lu stencil %lu | raster %d samples %lu alpha2cov %d topo %lu",
+                      d.label.UTF8String ?: "", vfn.name.UTF8String ?: "-", ffn.name.UTF8String ?: "-", vd.length ? vd.UTF8String : " none",
+                      (unsigned long)c0.pixelFormat, (int)c0.blendingEnabled, (unsigned long)c0.sourceRGBBlendFactor, (unsigned long)c0.destinationRGBBlendFactor, (unsigned long)c0.rgbBlendOperation,
+                      (unsigned long)c0.sourceAlphaBlendFactor, (unsigned long)c0.destinationAlphaBlendFactor, (unsigned long)c0.alphaBlendOperation, (unsigned long)c0.writeMask,
+                      (unsigned long)d.depthAttachmentPixelFormat, (unsigned long)d.stencilAttachmentPixelFormat, (int)d.rasterizationEnabled, (unsigned long)d.rasterSampleCount,
+                      (int)d.alphaToCoverageEnabled, (unsigned long)d.inputPrimitiveTopology);
+        for (id<MTLFunction> fn in @[vfn, ffn ?: vfn]) if ([fn isKindOfClass:[NVMTLFunction class]]) {
+            NSData *j = ((NVMTLFunction *)fn)->_fc ? [NSJSONSerialization dataWithJSONObject:((NVMTLFunction *)fn)->_fc options:NSJSONWritingSortedKeys error:NULL] : nil;
+            nvgfx_wstrace("PIPE fc %s %s", fn.name.UTF8String, j ? [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding].UTF8String : "-"); }
+    }
     if (!vfn) return nvmtl_fail(err, @"pipeline: descriptor is missing a vertex function");
     int noFrag = ffn == nil;
     if (noFrag) ffn = nvmtl_empty_fragment();

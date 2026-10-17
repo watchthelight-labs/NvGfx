@@ -2750,24 +2750,33 @@ static BOOL nvgfx_ws_interesting(NSString *n)
             id ffn = _ps->_descriptor.fragmentFunction; NSDictionary *fc = [ffn isKindOfClass:[NVMTLFunction class]] ? ((NVMTLFunction *)ffn)->_fc : nil;
             NSData *fj = fc ? [NSJSONSerialization dataWithJSONObject:fc options:NSJSONWritingSortedKeys error:NULL] : nil;
             NSString *fs2 = fj ? [[NSString alloc] initWithData:fj encoding:NSUTF8StringEncoding] : @"-";
-            nvgfx_wstrace("OFFS draw enc %p fs %s vs %s target %ux%u fmt %lu surf %u label '%s' | blend %s | ftex %s | fc %s", (__bridge void *)self,
+            id vfn = _ps->_descriptor.vertexFunction; NSDictionary *vfc = [vfn isKindOfClass:[NVMTLFunction class]] ? ((NVMTLFunction *)vfn)->_fc : nil;
+            NSData *vj = vfc ? [NSJSONSerialization dataWithJSONObject:vfc options:NSJSONWritingSortedKeys error:NULL] : nil;
+            NSString *vs2 = vj ? [[NSString alloc] initWithData:vj encoding:NSUTF8StringEncoding] : @"-";
+            nvgfx_wstrace("OFFS vfc enc %p vs %s vfc %s", (__bridge void *)self, _ps->_vname.UTF8String, [vs2 substringToIndex:MIN((NSUInteger)300, vs2.length)].UTF8String);
+            nvgfx_wstrace("OFFS draw%s enc %p fs %s vs %s target %ux%u fmt %lu surf %u label '%s' | blend %s | ftex %s | fc %s", NVMTL_RELEASE ? "" : " dbg", (__bridge void *)self,
                           _ps->_fname.UTF8String, _ps->_vname.UTF8String, [_target nvi]->w, [_target nvi]->h, (unsigned long)_target.pixelFormat,
                           tr->_surf ? (unsigned)IOSurfaceGetID(tr->_surf) : 0u, _target.label.UTF8String ?: "", _ps->_blend.UTF8String ?: "-",
                           ft ? [[[ft description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String] : "-",
-                          [fs2 substringToIndex:MIN((NSUInteger)300, fs2.length)].UTF8String);
+                          [fs2 stringByReplacingOccurrencesOfString:@"\":[0]" withString:@"\":0"].UTF8String);
             // N-99: for draws that sample a small A8 or RG8 texture (glyph masks, the badge digit): the texture's bytes, its
             // swizzle and backing, the vertex bytes (colour attribute) and the first uniform buffers.
             NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
             static NSMutableSet *gseen; static pthread_mutex_t gmu = PTHREAD_MUTEX_INITIALIZER;
             for (NSNumber *slot in fo) {
                 NVMTLTexture *bt = fo[slot]; unsigned long pf = (unsigned long)bt.pixelFormat; size_t W = bt.width, H = bt.height;
-                if (!(pf == 1 || pf == 30) || W > 256 || H > 256) continue;
+                // N-101: /tmp/nvmtl-alltex (or the flag beside wstrace.on) widens the dump to small BGRA textures as well, so a
+                // working draw can be replayed offline next to the failing one. Checked once a second like the trace flag.
+                static _Atomic int alltex; static _Atomic long atchk; { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+                    if (ts.tv_sec != atomic_load(&atchk)) { atomic_store(&atchk, ts.tv_sec); atomic_store(&alltex, access("/tmp/nvmtl-alltex", F_OK) == 0 || access("/Library/GPUBundles/nvmtl/wstrace.alltex", F_OK) == 0); } }
+                const size_t lim = atomic_load(&alltex) ? 512 : 256;
+                if (!((pf == 1 || pf == 30) || (atomic_load(&alltex) && pf == 80)) || W > lim || H > lim) continue;
                 // once per texture object (the clock text redraws every second and would eat any per-draw budget)
                 pthread_mutex_lock(&gmu); if (!gseen) gseen = [NSMutableSet new];
                 NSValue *gk = [NSValue valueWithPointer:(__bridge void *)bt]; BOOL gfirst = ![gseen containsObject:gk] && gseen.count < 200; if (gfirst) [gseen addObject:gk];
                 pthread_mutex_unlock(&gmu);
                 if (!gfirst) continue;
-                NVMTLTexture *rt = bt->_parent ?: bt; unsigned bpp = pf == 1 ? 1 : 2;
+                NVMTLTexture *rt = bt->_parent ?: bt; unsigned bpp = pf == 1 ? 1 : pf == 80 ? 4 : 2;
                 nvgfx_wstrace("OFFS GLYPH enc %p slot %d %p %zux%zu fmt %lu swz %d key %#x view %d surf %u parent %d usage %lu storage %lu", (__bridge void *)self, slot.intValue,
                               (__bridge void *)bt, W, H, pf, rt->_hasSwz, [bt swizzleKey], bt->_swzView != NULL, rt->_surf ? (unsigned)IOSurfaceGetID(rt->_surf) : 0u,
                               bt->_parent != nil, (unsigned long)bt.usage, (unsigned long)bt.storageMode);
