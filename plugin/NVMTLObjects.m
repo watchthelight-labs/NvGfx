@@ -2623,7 +2623,8 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
 static const void *NVGFX_FTEX_KEY = &NVGFX_FTEX_KEY;
 static const void *NVGFX_FSAMP_KEY = &NVGFX_FSAMP_KEY;
 static const void *NVGFX_CAP_KEY = &NVGFX_CAP_KEY;
-static const void *NVGFX_TGTRB_KEY = &NVGFX_TGTRB_KEY;   // N-103: the pass that drew a glyph: read its target back at completion
+static const void *NVGFX_TGTRB_KEY = &NVGFX_TGTRB_KEY;
+static const void *NVGFX_DISPRB_KEY = &NVGFX_DISPRB_KEY;   // N-115: screen pass that composited a read-back offscreen: read the region around the draw back   // N-103: the pass that drew a glyph: read its target back at completion
 static const void *NVGFX_GLYRB_KEY = &NVGFX_GLYRB_KEY;   // N-105: glyph textures sampled by this pass, read back from the GPU at completion
 static const void *NVGFX_BUFRB_KEY = &NVGFX_BUFRB_KEY;   // N-107: (name, buffer, offset) of the glyph draw's uniform/vertex buffers, read back at completion
 static NSMutableSet *gNvgfxRbSeen; static pthread_mutex_t gNvgfxRbMu = PTHREAD_MUTEX_INITIALIZER;   // targets read back so far (N-104: chained)
@@ -2679,12 +2680,26 @@ static BOOL nvgfx_ws_interesting(NSString *n)
         // shader settings, the draw's place in the pass and, once per texture object, its centre row with alpha.
         unsigned tw0 = _target ? [_target nvi]->w : 0u;
         static _Atomic unsigned nbadge;
-        if (tw0 >= 1000 && atomic_load(&nbadge) < 300) {
+        static _Atomic unsigned ncompdraw;
+        if (tw0 >= 1000 && (atomic_load(&nbadge) < 300 || atomic_load(&ncompdraw) < 40)) {
             NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
             for (NSNumber *slot in fo) {
                 id<MTLTexture> bt = fo[slot]; size_t W = bt.width, H = bt.height;
-                if (W < 16 || W > 160 || H < 16 || H > 160 || (W > H ? W - H : H - W) > 8) continue;
-                atomic_fetch_add(&nbadge, 1);
+                // N-115: the composite of a read-back offscreen (the badge label) onto the screen has its own budget and flags
+                // the pass for a readback of the screen region around the draw at completion
+                const BOOL comp = nvgfx_rb_contains(bt);
+                if (comp) { if (atomic_fetch_add(&ncompdraw, 1) >= 40) continue; }
+                else { if (W < 16 || W > 160 || H < 16 || H > 160 || (W > H ? W - H : H - W) > 8 || atomic_load(&nbadge) >= 300) continue; atomic_fetch_add(&nbadge, 1); }
+                if (comp) {
+                    NSArray *vb = _vbufAt[@1]; float vx = -1, vy = -1;
+                    if (vb) { NVMTLBuffer *nb = vb[0]; size_t off = [vb[1] unsignedLongValue]; const uint8_t *base = nb->_shadow.map ? nb->_shadow.map : (nb->_hostPtr ? nb->_hostPtr : nb->_b.map);
+                        if (base && off + 8 <= nb->_b.size) { memcpy(&vx, base + off, 4); memcpy(&vy, base + off + 4, 4); } }
+                    nvgfx_wstrace("COMP draw enc %p fs %s tex %p %zux%zu fetch mask %#x zero %#x vertex0 %.1f %.1f vp %s%.4g %.4g %.4g %.4g sc %s%u %u %u %u target %ux%u surf %u nEnd %u",
+                                  (__bridge void *)self, _ps->_fname.UTF8String, (__bridge void *)bt, W, H, _ps->_p.fetch_mask, _ps->_p.fetch_zero, vx, vy,
+                                  _hasVP ? "" : "(default) ", _vp[0], _vp[1], _vp[2], _vp[3], _hasSC ? "" : "(default) ", _sc[0], _sc[1], _sc[2], _sc[3],
+                                  tw0, _target ? [_target nvi]->h : 0u, (_target->_parent ?: _target)->_surf ? (unsigned)IOSurfaceGetID((_target->_parent ?: _target)->_surf) : 0u, (unsigned)_cb->_nEnd);
+                    if (vx >= 0 && vy >= 0 && !objc_getAssociatedObject(self, NVGFX_DISPRB_KEY)) objc_setAssociatedObject(self, NVGFX_DISPRB_KEY, @[@(vx), @(vy)], OBJC_ASSOCIATION_RETAIN);
+                }
                 id ffn = _ps->_descriptor.fragmentFunction; NSDictionary *fc = [ffn isKindOfClass:[NVMTLFunction class]] ? ((NVMTLFunction *)ffn)->_fc : nil;
                 NSData *fj2 = fc ? [NSJSONSerialization dataWithJSONObject:fc options:NSJSONWritingSortedKeys error:NULL] : nil;
                 NSString *fs2 = fj2 ? [[NSString alloc] initWithData:fj2 encoding:NSUTF8StringEncoding] : @"-";
@@ -3456,6 +3471,29 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
                     for (size_t cc = 0; cc < W * bpp && k + 3 < sizeof hx; cc++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", p[r * W * bpp + cc]);
                     nvgfx_wstrace("GLYPH GPU %p row %zu: %s", (__bridge void *)gt, r, hx); }
             }]; } } }
+    { NSArray *at = objc_getAssociatedObject(self, NVGFX_DISPRB_KEY);
+      if (at && _target && nvgfx_wstrace_on()) {
+        objc_setAssociatedObject(self, NVGFX_DISPRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
+        static _Atomic unsigned ndrb;
+        NVMTLTexture *tgt = _target; NSUInteger TW = tgt.width, TH = tgt.height;
+        const NSUInteger RW = 320, RH = 200; NSInteger x0 = (NSInteger)[at[0] floatValue] - 120, y0 = (NSInteger)[at[1] floatValue] - 60;
+        if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if ((NSUInteger)x0 + RW > TW) x0 = (NSInteger)(TW - RW); if ((NSUInteger)y0 + RH > TH) y0 = (NSInteger)(TH - RH);
+        if (tgt.pixelFormat == MTLPixelFormatBGRA8Unorm && TW >= RW && TH >= RH && atomic_fetch_add(&ndrb, 1) < 12) {
+            id<MTLBuffer> rb = [[_cb device] newBufferWithLength:RW * RH * 4 options:MTLResourceStorageModeShared];
+            id<MTLBlitCommandEncoder> bl = [_cb blitCommandEncoder];
+            [bl copyFromTexture:tgt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake((NSUInteger)x0, (NSUInteger)y0, 0) sourceSize:MTLSizeMake(RW, RH, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:RW * 4 destinationBytesPerImage:RW * RH * 4];
+            [bl endEncoding];
+            void *encp = (__bridge void *)self; NSInteger rx = x0, ry = y0;
+            [_cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+                const uint8_t *p = rb.contents; size_t n = RW * RH * 4, nz = 0; for (size_t k = 0; k < n; k++) if (p[k]) nz++;
+                nvgfx_wstrace("DISP READBACK %p region %ld %ld %lux%lu status %ld nonzero %zu/%zu enc %p", (__bridge void *)tgt, (long)rx, (long)ry, (unsigned long)RW, (unsigned long)RH, (long)c.status, nz, n, encp);
+                for (NSUInteger r = 0; r < RH; r += 2) { const uint8_t *row = p + r * RW * 4;   // every other row, alpha+luma packed: 2 hex chars per pixel (luma)
+                    char hx[700]; size_t k = 0;
+                    for (NSUInteger x = 0; x < RW && k + 3 < sizeof hx; x += 1) { unsigned l = (row[x * 4] + row[x * 4 + 1] + row[x * 4 + 2]) / 3; k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", l); }
+                    nvgfx_wstrace("DISP %p row %lu: %s", (__bridge void *)tgt, (unsigned long)r, hx); }
+            }];
+        }
+      } }
     if (objc_getAssociatedObject(self, NVGFX_TGTRB_KEY) && _target && nvgfx_wstrace_on()) {
         // N-103: the label pass that drew a glyph texture: copy its colour target into a shared buffer now (the pass is
         // closed, the command buffer is still open) and log the pixels once the GPU has finished. Once per target.
