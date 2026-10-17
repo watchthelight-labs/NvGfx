@@ -2755,6 +2755,28 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                           tr->_surf ? (unsigned)IOSurfaceGetID(tr->_surf) : 0u, _target.label.UTF8String ?: "", _ps->_blend.UTF8String ?: "-",
                           ft ? [[[ft description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String] : "-",
                           [fs2 substringToIndex:MIN((NSUInteger)300, fs2.length)].UTF8String);
+            // N-99: for draws that sample a small A8 or RG8 texture (glyph masks, the badge digit): the texture's bytes, its
+            // swizzle and backing, the vertex bytes (colour attribute) and the first uniform buffers.
+            NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY); static _Atomic unsigned nglyph;
+            for (NSNumber *slot in fo) {
+                NVMTLTexture *bt = fo[slot]; unsigned long pf = (unsigned long)bt.pixelFormat; size_t W = bt.width, H = bt.height;
+                if (!(pf == 1 || pf == 30) || W > 256 || H > 256 || atomic_fetch_add(&nglyph, 1) >= 40) continue;
+                NVMTLTexture *rt = bt->_parent ?: bt; unsigned bpp = pf == 1 ? 1 : 2;
+                nvgfx_wstrace("OFFS GLYPH enc %p slot %d %p %zux%zu fmt %lu swz %d key %#x view %d surf %u parent %d usage %lu storage %lu", (__bridge void *)self, slot.intValue,
+                              (__bridge void *)bt, W, H, pf, rt->_hasSwz, [bt swizzleKey], bt->_swzView != NULL, rt->_surf ? (unsigned)IOSurfaceGetID(rt->_surf) : 0u,
+                              bt->_parent != nil, (unsigned long)bt.usage, (unsigned long)bt.storageMode);
+                uint8_t *px = (uint8_t *)calloc(W * H, bpp);
+                if (px) { [bt getBytes:px bytesPerRow:W * bpp fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+                    size_t nz = 0; for (size_t k = 0; k < W * H * bpp; k++) if (px[k]) nz++;
+                    nvgfx_wstrace("OFFS GLYPH %p nonzero %zu/%zu", (__bridge void *)bt, nz, W * H * bpp);
+                    size_t rstep = H / 6 ? H / 6 : 1, cstep = W * bpp > 300 ? (W * bpp) / 300 : 1;
+                    for (size_t r = rstep; r < H; r += rstep) { char hx[700]; size_t k = 0;
+                        for (size_t c = 0; c < W * bpp && k + 3 < sizeof hx; c += cstep) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", px[r * W * bpp + c]);
+                        nvgfx_wstrace("OFFS GLYPH %p row %zu: %s", (__bridge void *)bt, r, hx); }
+                    free(px); }
+                nvgfx_cap_hex("OFFS VBUF", _vbufAt, 1, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 0, 96);
+                for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS FBUF", _fbufAt, i, 256);
+            }
         }
     }
     if (nvgfx_wstrace_on() && _ps->_fname && ([_ps->_fname hasPrefix:@"sdf_"] || [_ps->_fname hasPrefix:@"glass_"])) {
