@@ -2772,7 +2772,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
             NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
             if (objc_getAssociatedObject(self, NVGFX_TGTRB_KEY)) {   // N-110: a flagged pass: every draw after the glyph dumps its inputs for the offline pass replay
                 nvgfx_wstrace("OFFS PASSDRAW enc %p fs %s blend %s", (__bridge void *)self, _ps->_fname.UTF8String, _ps->_blend.UTF8String ?: "-");
-                for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS VBUF", _vbufAt, i, i == 1 ? 192 : 64);
+                for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS VBUF", _vbufAt, i, i == 1 ? 1024 : 64);   // N-111: 1024 B for the 16-vertex pill draw
                 for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("OFFS FBUF", _fbufAt, i, 512);
                 objc_setAssociatedObject(self, NVGFX_CAP_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
             }
@@ -2808,7 +2808,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                         nvgfx_wstrace("OFFS GLYPH %p row %zu: %s", (__bridge void *)bt, r, hx); }
                     free(px); }
                 nvgfx_cap_hex("OFFS VBUF", _vbufAt, 1, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 0, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 2, 64); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 3, 64);   // N-102: mvp and texture_matrix too
-                if (pf == 1 || pf == 30) { objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, @YES, OBJC_ASSOCIATION_RETAIN);   // N-103: read the target back when this pass ends
+                if (pf == 1 || pf == 30 || (atomic_load(&alltex) && W * H * 4 <= 64 * 1024)) { objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, @YES, OBJC_ASSOCIATION_RETAIN);   // N-103: read the target back when this pass ends (N-111: small BGRA glyphs too)
                     NSMutableArray *gl = objc_getAssociatedObject(self, NVGFX_GLYRB_KEY); if (!gl) { gl = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_GLYRB_KEY, gl, OBJC_ASSOCIATION_RETAIN); }
                     [gl addObject:bt];
                     NSMutableArray *br = objc_getAssociatedObject(self, NVGFX_BUFRB_KEY); if (!br) { br = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_BUFRB_KEY, br, OBJC_ASSOCIATION_RETAIN); }
@@ -3415,7 +3415,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
                 for (NSUInteger o = 0; o < len; o += 96) { char hx[200]; size_t k = 0; for (NSUInteger j = o; j < len && j < o + 96; j++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", p[j]);
                     nvgfx_wstrace("GPU %s enc %p +%lu/%lu: %s", name.UTF8String, encp, (unsigned long)o, (unsigned long)len, hx); } }]; } } }
     { NSArray *gl = objc_getAssociatedObject(self, NVGFX_GLYRB_KEY);
-      if (0 && gl.count && nvgfx_wstrace_on()) {   // N-105 glyph GPU readback, off since N-110 objc_setAssociatedObject(self, NVGFX_GLYRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
+      if (gl.count && nvgfx_wstrace_on()) {   // N-105 glyph GPU readback; N-111: on again, now for the small BGRA glyphs as well objc_setAssociatedObject(self, NVGFX_GLYRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
         for (NVMTLTexture *gt in gl) { NSUInteger W = gt.width, H = gt.height, bpp = gt.pixelFormat == MTLPixelFormatA8Unorm ? 1 : gt.pixelFormat == MTLPixelFormatRG8Unorm ? 2 : 4;
             if (W * H * bpp > 64 * 1024) continue;
             id<MTLBuffer> rb = [[_cb device] newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
@@ -3426,8 +3426,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
             [_cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
                 const uint8_t *p = rb.contents; size_t n = W * H * bpp, nz = 0; for (size_t k = 0; k < n; k++) if (p[k]) nz++;
                 nvgfx_wstrace("GLYPH GPU %p %lux%lu fmt %lu status %ld nonzero %zu/%zu", (__bridge void *)gt, (unsigned long)W, (unsigned long)H, fmt, (long)c.status, nz, n);
-                size_t rstep = H / 6 ? H / 6 : 1;
-                for (size_t r = rstep; r < H; r += rstep) { char hx[700]; size_t k = 0;
+                size_t rstep = (W * bpp <= 300 && H <= 64) ? 1 : (H / 6 ? H / 6 : 1);
+                for (size_t r = rstep == 1 ? 0 : rstep; r < H; r += rstep) { char hx[700]; size_t k = 0;
                     for (size_t cc = 0; cc < W * bpp && k + 3 < sizeof hx; cc++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", p[r * W * bpp + cc]);
                     nvgfx_wstrace("GLYPH GPU %p row %zu: %s", (__bridge void *)gt, r, hx); }
             }]; } } }
