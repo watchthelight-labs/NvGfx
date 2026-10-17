@@ -1,6 +1,6 @@
 #!/bin/bash
-# NvGfx: make an installable package from the shipped NullMoth 2.1.0 pkgroot with our builds swapped in.
-#   REF  = shipped pkgroot (default: the audited 2.1.0 package)
+# NvGfx: make an installable package from the shipped NullMoth pkgroot with our builds swapped in.
+#   REF  = shipped pkgroot (default: the audited 2.3.5 package)
 #   OUT  = output pkgroot (default ~/src/NvGfx-build/pkg/<label>)
 #   Components to swap are given as env vars pointing at built files (unset = keep shipped):
 #     NVGFX_PLUGIN (NVMTLDriver), NVGFX_XLATE (libnvmtl_translate.dylib), NVGFX_NVK (libvulkan_nouveau.dylib),
@@ -24,8 +24,9 @@ swap_kext "${NVGFX_NVACCEL15:-}" "$OUT/Library/Extensions/NVAccel.kext"
 [ -d "$OUT/Library/NullMoth/kexts/15/NVAccel.kext" ] && swap_kext "${NVGFX_NVACCEL15:-}" "$OUT/Library/NullMoth/kexts/15/NVAccel.kext"
 [ -d "$OUT/Library/NullMoth/kexts/26/NVAccel.kext" ] && swap_kext "${NVGFX_NVACCEL26:-}" "$OUT/Library/NullMoth/kexts/26/NVAccel.kext"
 codesign -f -s - "$B" 2>/dev/null   # the shipped bundle is ad-hoc signed as a bundle
+printf '%s\nbase NullMoth %s, NvGfx %s\n' "$LABEL" "$(cat "$REF/VERSION")" "$(git -C "$R" rev-parse --short HEAD)" > "$OUT/NVGFX-VERSION"
 # Rewrite the identity of the four paired kexts the same way the shipped file lists them, then every checksum.
-/usr/bin/python3 - "$OUT" <<'PY'
+[ ! -f "$OUT/BASELINE-IDENTITY.json" ] || /usr/bin/python3 -I - "$OUT" <<'PY'
 import hashlib, json, os, sys
 o = sys.argv[1]; p = os.path.join(o, "BASELINE-IDENTITY.json")
 d = json.load(open(p))
@@ -36,6 +37,6 @@ for name, ent in d.get("paired_kexts", {}).items():
 d["nvgfx"] = open(os.path.join(o, "NVGFX-VERSION")).read().strip() if os.path.exists(os.path.join(o, "NVGFX-VERSION")) else "nvgfx"
 json.dump(d, open(p, "w"), indent=2)
 PY
-(cd "$OUT" && awk '{print $2}' SHA256SUMS | while read -r f; do shasum -a 256 "$f"; done > SHA256SUMS.new && mv SHA256SUMS.new SHA256SUMS)
-printf '%s\nbase NullMoth %s, NvGfx %s\n' "$LABEL" "$(cat "$REF/VERSION")" "$(git -C "$R" rev-parse --short HEAD)" > "$OUT/NVGFX-VERSION"
+# the manifest lists "<hash>  <path>" (two spaces, no binary marker); keep the path whole even with spaces
+(cd "$OUT" && sed -E 's/^[0-9a-f]{64} [ *]//' SHA256SUMS | while IFS= read -r f; do shasum -a 256 "$f"; done > SHA256SUMS.new && mv SHA256SUMS.new SHA256SUMS)
 (cd "$OUT" && shasum -a 256 --strict -c SHA256SUMS --quiet) && echo "package ok: $OUT"
