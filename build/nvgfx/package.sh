@@ -8,7 +8,7 @@
 # The result keeps install.sh/uninstall.sh unchanged; SHA256SUMS, BASELINE-IDENTITY.json and NVGFX-VERSION are rewritten.
 set -euo pipefail
 LABEL=${1:?usage: package.sh <label, e.g. 2.1.0-nvgfx.1>}
-REF=${REF:-$HOME/Hackintosh/tooling/quarantine/nullmoth-release-2.1.0/x/pkgroot}
+REF=${REF:-$HOME/Hackintosh/tooling/quarantine/nullmoth-release-2.3.5/x/pkgroot}
 OUT=${OUT:-$HOME/src/NvGfx-build/pkg/$LABEL}
 R=$(cd "$(dirname "$0")/../.." && pwd)
 rm -rf "$OUT"; mkdir -p "$(dirname "$OUT")"; cp -Rp "$REF" "$OUT"
@@ -38,4 +38,4 @@ json.dump(d, open(p, "w"), indent=2)
 PY
 (cd "$OUT" && awk '{print $2}' SHA256SUMS | while read -r f; do shasum -a 256 "$f"; done > SHA256SUMS.new && mv SHA256SUMS.new SHA256SUMS)
 printf '%s\nbase NullMoth %s, NvGfx %s\n' "$LABEL" "$(cat "$REF/VERSION")" "$(git -C "$R" rev-parse --short HEAD)" > "$OUT/NVGFX-VERSION"
-(cd "$OUT" && shasum -a 256 -c SHA256SUMS --quiet) && echo "package ok: $OUT"
+(cd "$OUT" && shasum -a 256 --strict -c SHA256SUMS --quiet) && echo "package ok: $OUT"

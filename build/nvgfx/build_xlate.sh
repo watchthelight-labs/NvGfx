@@ -7,7 +7,7 @@ export PATH=$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin
 R=$(cd "$(dirname "$0")/../.." && pwd)
 X=$R/translator
 O=${NVGFX_OUT:-$HOME/src/NvGfx-build}/xlate; mkdir -p "$O"
-REF=${NVGFX_REF_PKGROOT:-$HOME/Hackintosh/tooling/quarantine/nullmoth-release-2.1.0/x/pkgroot}
+REF=${NVGFX_REF_PKGROOT:-$HOME/Hackintosh/tooling/quarantine/nullmoth-release-2.3.5/x/pkgroot}
 export RUSTFLAGS="--remap-path-prefix=$X=/src --remap-path-prefix=$HOME/.cargo=/cargo --remap-path-prefix=$HOME=/build"
 cd "$X"
 cargo build --release --manifest-path wrapper/Cargo.toml --target-dir "$O/target" > "$O/cargo.log" 2>&1 || { echo "cargo build failed: $O/cargo.log"; tail -20 "$O/cargo.log"; exit 4; }

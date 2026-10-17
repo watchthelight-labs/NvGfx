@@ -26,7 +26,7 @@ TAG=610.57.04
 OGKM=$O/ogkm
 JOBS=${JOBS:-8}
 PARITY=${NVRM_PARITY:-0}
-REF=${NVGFX_REF_PKGROOT:-$HOME/Hackintosh/tooling/quarantine/nullmoth-release-2.1.0/x/pkgroot}
+REF=${NVGFX_REF_PKGROOT:-$HOME/Hackintosh/tooling/quarantine/nullmoth-release-2.3.5/x/pkgroot}
 CC=$(xcrun -f clang); CXX=$(xcrun -f clang++)
 export SDKROOT=$(xcrun --show-sdk-path); SDK=$SDKROOT; KHDR="$SDK/System/Library/Frameworks/Kernel.framework/Headers"
 mkdir -p "$O/logs"

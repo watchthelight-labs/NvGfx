@@ -23,6 +23,6 @@ build_one() {   # build_one <NVAccel|NMXAccel> <15|26>
 
 ABI=$(sed -n 's/^#define NVRM_VRAM_ABI_VERSION \([0-9]*\)u.*/\1/p' "$SRC/nvrm_vram_abi.h")
 [ -n "$ABI" ] || { echo "cannot read NVRM_VRAM_ABI_VERSION"; exit 1; }
-case "$WHAT" in nvaccel) names=(NVAccel) ;; nmxaccel) names=(NMXAccel) ;; all) names=(NVAccel NMXAccel) ;; *) echo "usage: $0 [nvaccel|nmxaccel|all]"; exit 2 ;; esac
+case "$WHAT" in nvaccel|all) names=(NVAccel) ;; *) echo "usage: $0 [nvaccel]   (NMXAccel left the package in 2.2.0)"; exit 2 ;; esac
 for n in "${names[@]}"; do for major in 15 26; do build_one "$n" "$major" || exit 1; done; done
 echo "built from $(git -C "$REPO" rev-parse --short HEAD) (VRAM ABI $ABI)"
