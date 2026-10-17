@@ -1,28 +1,79 @@
-# NvGfx
+# NvGfx fork notes
 
-NvGfx is watchthelight's fork of [NullMoth's NVIDIA Metal driver for macOS](https://github.com/nullmoth/nvidia-macos-driver), kept for one machine: a Lenovo Legion 5 15IAX10 (RTX 5070 Laptop GPU, 10DE:2D18, AMOLED panel driven by the NVIDIA GPU) running macOS 15.8.1 through OpenCore. The name follows the same scheme as our MediaTek drivers (MtkWlan, MtkBt).
+The `nvgfx` branch is NullMoth's 2.1.0 plus the changes in the README table. This file is the index of what the fork adds and how to switch it. The reasoning behind each change is in `notes/`.
+
+## Branches and versions
+
+- `main`: upstream NullMoth, mirrored as is.
+- `nvgfx`: our changes on top of the upstream 2.1.0 tag. Packages built from it are labelled `2.1.0-nvgfx.N` (`package.sh` writes the label into `NVGFX-VERSION` in the package).
+
+## Boot-args added by the fork
+
+All default off. With none set the kexts behave as upstream, apart from the Terminal fix and the present path, which are always on.
+
+| Boot-arg | Kext | Effect |
+|---|---|---|
+| `nvrmtgp=1` | NVRM | at boot on AC, put the GSP in TGP mode (115 W on the RTX 5070 Laptop instead of the 50 W default) and follow `_PSR` afterwards |
+| `nvrmgps=1` | NVRM | answer the GPS `_DSM` on the GPU node, so the RM's platform request handler finds GPS_2X |
+| `nvrmnvpcf=1` | NVRM | answer the NVPCF `_DSM` on `\_SB.NPCF`, as Linux does |
+| `nvrmphysctl=1` | NVRM | root-only control escape (0xE4) used by `nvgfx-smi --phys` and `--ctrl` |
+| `nvgfxwsfetch=1` | plugin | enable framebuffer fetch in WindowServer only (Dock blur investigation) |
+| `nvgfxfetchcopy=1` | plugin | emulate framebuffer fetch with copies in WindowServer when fetch is off |
+
+Upstream's own boot-args (`nvfb`, `nvaccel`, `nvfbheads`, `nvrmacpibl`, `-nvrmnoflip`, `-nvaccelnoheadless` and the rest) are unchanged.
+
+## Sysctls
+
+- `debug.nvgfx_present_depth`: how many flips may be in flight (default 2).
+- `debug.nvgfx_fb_*`: present path counters (submits, latched, refused, superseded, timeouts, commit and latch times, vblank hops).
+- `debug.nvgfx_dirty_*`: why NVAccel surface dirty marks were refused or re-wired (parked VRAM, no resource, scanout).
+- `debug.nvgfx_tgp_*`: TGP mode state and the last control results.
+
+## Environment switches (plugin)
+
+Read from `/Library/GPUBundles/nvmtl/nvrm610.conf` in release builds, since the plugin unsets `NVMTL_*` variables at load.
+
+| Switch | Effect |
+|---|---|
+| `NVMTL_NVGFX_LEGACY_FBFETCH=1` | every render pass is a fetch pass again (2.1.0 behaviour, brings the Terminal overdraw back) |
+| `NVMTL_NVGFX_LEGACY_SEMU=1` | 2.1.0's broad stencil-export detector |
+| `NVMTL_NVGFX_FETCH_COPY=1` | framebuffer fetch emulated by copies for every process |
+| `NVMTL_NVGFX_FCOPY_FORCE_FAIL=1` | make the fetch-copy pipeline fail, to test the rebuild-without-it path |
+| `NVMTL_NVGFX_SURFOUT_TRACE=1` | syslog trace of surface copy-outs |
+| `NVMTL_NVGFX_WSTRACE=1` | WindowServer trace: samplers, pipelines, small render targets, the backdrop composite draw, draws that sample small square textures |
+
+## Where things are
+
+| Path | What |
+|---|---|
+| `plugin/nvmtl_vk.c`, `plugin/nvmtl_vk.h` | render pass kinds per pipeline, pass restart, fetch-copy emulation |
+| `plugin/NVMTLObjects.m` | encoder changes for the pass restart, WindowServer trace |
+| `plugin/NVMTLLibraryLoad.m` | shader cache fallback folder |
+| `plugin/nvgfx_fetch_copy.h`, `plugin/nvgfx_wstrace.h` | the fetch-copy and trace helpers |
+| `kexts/NVRMFB/fb/nvrm-fb.cpp`, `kexts/NVRMFB/fb/nvgfx_present_abi.h` | the present path |
+| `kexts/NVRM/accel/nvrm-accel.cpp` | dirty-mark accounting, parked VRAM re-wiring |
+| `kexts/NVRM/nvrm_power.cpp`, `nvrm_physctl.c`, `nvrm_physctl_abi.h` | TGP mode, platform `_DSM`s, control escape |
+| `kexts/NVRM/os-xnu.cpp`, `os-xnu2.cpp`, `NVRM.cpp` | the glue the harness needed to rebuild NVRM from source |
+| `nvk/nvgfx/01-nv_push-opencl.patch` | one build fix on top of NullMoth's NVK patches |
+| `build/nvgfx/` | build scripts, the NVRM harness, comparison tools, `package.sh` |
+| `tools/nvgfx-smi`, `tools/nvgfx-burn` | telemetry and load tools |
+| `notes/` | the working notes behind each change |
+
+## Measured on the test machine
+
+RTX 5070 Laptop (`10DE:2D18`), 2560x1600 at 165 Hz, macOS 26.7.1 (25G241), OpenCore 1.0.8, package 2.1.0-nvgfx.20:
+
+- Metal 3 device, accelerated desktop, Liquid Glass renders.
+- Present path: flips latched at the panel rate (165/s), window drags about 148 fps; shipped 2.1.0 on the same machine did about 54.
+- Power: 115 W enforced with `nvrmtgp=1` (VBIOS default 50 W; Windows runs the same GPU at 115 W with Dynamic Boost).
+- Terminal overdraw from 2.1.0: gone since nvgfx.1.
+- WindowServer CPU after boot: normal since nvgfx.20 (before: about 150 % while it re-translated every shader).
+- Still wrong: the Dock's blur draws as blocks (a WindowServer framebuffer-fetch problem, under investigation with the trace switches).
 
 ## Credit
 
-All of the driver is NullMoth's work unless a commit on the `nvgfx` branch says otherwise. The full upstream history is kept here unchanged.
+All of the driver is NullMoth's work unless a commit on the `nvgfx` branch says otherwise. The full upstream history is kept here unchanged. Bug reports and fixes that apply to everyone go to NullMoth first.
 
 Required Notice: Copyright (c) 2026 NullMoth Systems (https://nullmothsystems.com)
 
-It is distributed under the PolyForm Noncommercial License 1.0.0 (see `LICENSE`, https://polyformproject.org/licenses/noncommercial/1.0.0). Use it for noncommercial purposes only. Third-party parts keep their own terms, listed in `NOTICE`:
-
-- NVIDIA open GPU kernel modules (MIT / GPL-2.0), which the kexts build against
-- Mesa NVK (MIT), changed by NullMoth through patches
-- metal2vulkan by Anees Iqbal (LGPL-3.0 or later), the base of `translator/`
-- NVIDIA GSP firmware, under NVIDIA's firmware licence
-
-## Branches
-
-- `main`: upstream NullMoth, mirrored as is.
-- `nvgfx`: our changes on top of an upstream tag.
-
-## Why the fork exists
-
-1. NullMoth 2.1.0 draws new content over old content in Terminal without clearing it (text layers stack; project-legion issue I-048). 2.0.2 does not show it. The goal is to find and fix the cause and to send the fix upstream as well.
-2. Window drags run at about 54 frames per second with page flips on (78 in copy mode) on a 165 Hz panel. The goal is smooth motion without the artifacts copy mode brings.
-
-Bug reports and fixes that apply to everyone go to NullMoth first.
+Distributed under the PolyForm Noncommercial License 1.0.0 (`LICENSE`, https://polyformproject.org/licenses/noncommercial/1.0.0): noncommercial use only. Third-party parts keep their own terms, listed in `NOTICE`.
