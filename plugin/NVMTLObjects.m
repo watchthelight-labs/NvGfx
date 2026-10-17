@@ -2646,6 +2646,43 @@ static BOOL nvgfx_ws_interesting(NSString *n)
         NSDictionary *ft = objc_getAssociatedObject(self, NVGFX_FTEX_KEY);
         BOOL strip = NO;
         for (NSString *v in ft.allValues) { unsigned w = 0, h = 0; if (sscanf(v.UTF8String, "%ux%u", &w, &h) == 2 && w >= 32 && w < 700 && h <= 16) strip = YES; }
+        // N-85: Dock badge. Draws into the screen that sample a small, nearly square texture (badge, icon tile): log the
+        // shader settings, the draw's place in the pass and, once per texture object, its centre row with alpha.
+        unsigned tw0 = _target ? [_target nvi]->w : 0u;
+        static _Atomic unsigned nbadge;
+        if (tw0 >= 1000 && atomic_load(&nbadge) < 300) {
+            NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
+            for (NSNumber *slot in fo) {
+                id<MTLTexture> bt = fo[slot]; size_t W = bt.width, H = bt.height;
+                if (W < 16 || W > 160 || H < 16 || H > 160 || (W > H ? W - H : H - W) > 8) continue;
+                atomic_fetch_add(&nbadge, 1);
+                id ffn = _ps->_descriptor.fragmentFunction; NSDictionary *fc = [ffn isKindOfClass:[NVMTLFunction class]] ? ((NVMTLFunction *)ffn)->_fc : nil;
+                NSData *fj2 = fc ? [NSJSONSerialization dataWithJSONObject:fc options:NSJSONWritingSortedKeys error:NULL] : nil;
+                NSString *fs2 = fj2 ? [[NSString alloc] initWithData:fj2 encoding:NSUTF8StringEncoding] : @"-";
+                MTLRenderPipelineColorAttachmentDescriptor *ca0 = _ps->_descriptor.colorAttachments[0];
+                static _Atomic unsigned long bseq;
+                nvgfx_wstrace("BADGE draw %lu enc %p fs %s slot %d tex %p %zux%zu fmt %lu blend %d rgb %lu/%lu op %lu a %lu/%lu wm %lu | ftex %s",
+                              (unsigned long)atomic_fetch_add(&bseq, 1), (__bridge void *)self, _ps->_fname.UTF8String, slot.intValue, (__bridge void *)bt, W, H, (unsigned long)bt.pixelFormat,
+                              ca0.blendingEnabled, (unsigned long)ca0.sourceRGBBlendFactor, (unsigned long)ca0.destinationRGBBlendFactor,
+                              (unsigned long)ca0.rgbBlendOperation, (unsigned long)ca0.sourceAlphaBlendFactor, (unsigned long)ca0.destinationAlphaBlendFactor,
+                              (unsigned long)ca0.writeMask, [[[ft description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String]);
+                for (NSUInteger o = 0; o < fs2.length; o += 600)
+                    nvgfx_wstrace("BADGE FC +%lu: %s", (unsigned long)o, [fs2 substringWithRange:NSMakeRange(o, MIN((NSUInteger)600, fs2.length - o))].UTF8String);
+                nvgfx_cap_hex("BADGE FBUF", _fbufAt, 0, 64);
+                static NSMutableSet *dumped; static pthread_mutex_t bmu = PTHREAD_MUTEX_INITIALIZER;
+                pthread_mutex_lock(&bmu); if (!dumped) dumped = [NSMutableSet new];
+                NSValue *tk = [NSValue valueWithPointer:(__bridge void *)bt]; BOOL first = ![dumped containsObject:tk] && dumped.count < 40; if (first) [dumped addObject:tk];
+                pthread_mutex_unlock(&bmu);
+                if (first && (bt.pixelFormat == MTLPixelFormatBGRA8Unorm || bt.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)) {
+                    uint8_t *px = (uint8_t *)calloc(W * H, 4);
+                    if (px) { [bt getBytes:px bytesPerRow:W * 4 fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+                        for (size_t r = H / 4; r < H; r += H / 4) { char hx[1400]; size_t k = 0;
+                            for (size_t c = 0; c < W; c++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x%02x%02x%02x", px[(r * W + c) * 4 + 2], px[(r * W + c) * 4 + 1], px[(r * W + c) * 4], px[(r * W + c) * 4 + 3]);
+                            nvgfx_wstrace("BADGE TEX %p row %zu/%zu (RGBA): %s", (__bridge void *)bt, r, H, hx); }
+                        free(px); }
+                }
+            }
+        }
         static _Atomic unsigned ncomp;
         if (strip && atomic_fetch_add(&ncomp, 1) < 40) {
             NSData *fj = _fragmentSamplers.count ? [NSJSONSerialization dataWithJSONObject:_fragmentSamplers options:NSJSONWritingSortedKeys error:NULL] : nil;
