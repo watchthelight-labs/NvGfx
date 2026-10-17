@@ -4,8 +4,16 @@ The `nvgfx` branch is NullMoth's 2.1.0 plus the changes in the README table. Thi
 
 ## Branches and versions
 
-- `main`: upstream NullMoth, mirrored as is.
-- `nvgfx`: our changes on top of the upstream 2.1.0 tag. Packages built from it are labelled `2.1.0-nvgfx.N` (`package.sh` writes the label into `NVGFX-VERSION` in the package).
+- `main`: upstream as pulled (tags `v2.1.0` .. `v2.3.5`).
+- `nvgfx-2.3.5` (current): our changes on top of the upstream 2.3.5 tag. Packages built from it are labelled `2.3.5-nvgfx.N`
+  (`package.sh` writes the label into `NVGFX-VERSION`). Carried over from `nvgfx`: the build harness (`build/nvgfx`), the
+  NVRM power glue (`nvrmtgp` 115 W, `nvrmgps`/`nvrmnvpcf`, `nvrmphysctl`), the WindowServer shader-cache fallback, the
+  A8Unorm render-target fix (plugin and translator) and the zeroed `[[color(n)]]` reads when framebuffer fetch is off.
+  Not carried over, because 2.3.x covers the same ground or the change was not yet measured against it: the dropped-draw
+  fetch fix (upstream 351f5ed), the per-pipeline fetch passes for the Terminal overdraw, the event-driven present path
+  and the surface dirty-mark rewire. Both of the last two come back only on evidence (see `notes/`).
+- `nvgfx`: our changes on top of the upstream 2.1.0 tag (`2.1.0-nvgfx.N`, last tested `2.1.0-nvgfx.20`). Kept for the
+  trace tooling on `dock-trace` and as the rollback.
 
 ## Boot-args added by the fork
 
