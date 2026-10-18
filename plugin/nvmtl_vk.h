@@ -83,6 +83,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  nvmtl_sample_pattern sample_pattern;
                  void **rvs; unsigned nrv, caprv;
                  int restart_off;   /* Apple GL turned primitive restart off for this encoder (setPrimitiveRestartEnabled:) */
+                 void *graphics_pipeline;   /* the VkPipeline last bound at the graphics bind point: a repeat bind is skipped */
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
 int nvmtl_vk_sample_positions_backend(void);
