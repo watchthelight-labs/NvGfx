@@ -2625,6 +2625,7 @@ static const void *NVGFX_FSAMP_KEY = &NVGFX_FSAMP_KEY;
 static const void *NVGFX_CAP_KEY = &NVGFX_CAP_KEY;
 static const void *NVGFX_TGTRB_KEY = &NVGFX_TGTRB_KEY;
 static const void *NVGFX_DISPRB_KEY = &NVGFX_DISPRB_KEY;
+static const void *NVGFX_SRCRB_KEY = &NVGFX_SRCRB_KEY;   // N-125: sampled textures of Dock composites, read back when the command buffer completes
 static _Atomic uint64_t gNvgfxLabelNs;   // N-121: when a badge-like offscreen pass was last flagged; composites are logged only in the 400 ms after it   // N-115: screen pass that composited a read-back offscreen: read the region around the draw back   // N-103: the pass that drew a glyph: read its target back at completion
 static const void *NVGFX_GLYRB_KEY = &NVGFX_GLYRB_KEY;   // N-105: glyph textures sampled by this pass, read back from the GPU at completion
 static const void *NVGFX_BUFRB_KEY = &NVGFX_BUFRB_KEY;   // N-107: (name, buffer, offset) of the glyph draw's uniform/vertex buffers, read back at completion
@@ -2683,7 +2684,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
         static _Atomic unsigned nbadge;
         static _Atomic unsigned ncompdraw;
         NVGFX_FRESH(nbadge); NVGFX_FRESH(ncompdraw);
-        if (tw0 >= 1000 && (atomic_load(&nbadge) < 300 || atomic_load(&ncompdraw) < 40)) {
+        if (tw0 >= 1000 && (atomic_load(&nbadge) < 300 || atomic_load(&ncompdraw) < 400)) {
             NSDictionary *fo = objc_getAssociatedObject(self, NVGFX_FTOBJ_KEY);
             for (NSNumber *slot in fo) {
                 id<MTLTexture> bt = fo[slot]; size_t W = bt.width, H = bt.height;
@@ -2703,7 +2704,15 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                             if (cw != 0.f) { cx /= cw; cy /= cw; } sx = (cx + 1.f) * 0.5f * (float)tw0; sy = (1.f - cy) * 0.5f * (float)(_target ? [_target nvi]->h : 0u); } } }
                 // N-122: the Dock badge is composited from small textures (a 28x28 A8 disc mask, 32x32 and 16x16 tiles, the digit
                 // glyph) in the Dock band; the 128 px scratch offscreen chased before belongs to the menu bar (N-121).
-                const BOOL dock = sy > 1400.f && W <= 64 && H <= 64;
+                // N-125: every texture size; the red disc and the digit were not among the small ones
+                const BOOL dock = sy > 1400.f;
+                float qx[4] = { sx, -1, -1, -1 }, qy[4] = { sy, -1, -1, -1 };   // N-125: the other three vertices through the same mvp
+                { NSArray *mb = _vbufAt[@2]; if (vb && mb && dock) { NVMTLBuffer *nb = vb[0], *mbb = mb[0]; size_t off = [vb[1] unsignedLongValue], moff = [mb[1] unsignedLongValue];
+                    const uint8_t *vbase = nb->_shadow.map ? nb->_shadow.map : (nb->_hostPtr ? nb->_hostPtr : nb->_b.map), *mbase = mbb->_shadow.map ? mbb->_shadow.map : (mbb->_hostPtr ? mbb->_hostPtr : mbb->_b.map);
+                    if (vbase && mbase && moff + 64 <= mbb->_b.size) { float m[16]; memcpy(m, mbase + moff, 64); float th = (float)(_target ? [_target nvi]->h : 0u);
+                        for (int k = 1; k < 4; k++) { if (off + 48 * k + 8 > nb->_b.size) break; float x_, y_; memcpy(&x_, vbase + off + 48 * k, 4); memcpy(&y_, vbase + off + 48 * k + 4, 4);
+                            float cx = m[0] * x_ + m[4] * y_ + m[12], cy = m[1] * x_ + m[5] * y_ + m[13], cw = m[3] * x_ + m[7] * y_ + m[15]; if (cw != 0.f) { cx /= cw; cy /= cw; }
+                            qx[k] = (cx + 1.f) * 0.5f * (float)tw0; qy[k] = (1.f - cy) * 0.5f * th; } } } }
                 uint64_t sinceLabel = ~0ull; { uint64_t t0 = atomic_load(&gNvgfxLabelNs); if (t0) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); sinceLabel = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - t0; } }
                 BOOL comp = dock || (nvgfx_rb_contains(bt) && sinceLabel < 400000000ull);
                 // N-123: the Dock composites the same few small tiles every frame; one record per (size, format, screen cell) per
@@ -2713,13 +2722,14 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                     NSString *ck = [NSString stringWithFormat:@"%zux%zu/%lu@%d,%d", W, H, (unsigned long)bt.pixelFormat, (int)(sx / 16.f), (int)(sy / 16.f)];
                     pthread_mutex_lock(&ckmu); if (!ckeys) ckeys = [NSMutableSet new]; BOOL seen = [ckeys containsObject:ck]; if (!seen) [ckeys addObject:ck]; pthread_mutex_unlock(&ckmu);
                     if (seen) comp = NO; }
-                if (comp) { if (atomic_fetch_add(&ncompdraw, 1) >= 200) continue; }
+                if (comp) { if (atomic_fetch_add(&ncompdraw, 1) >= 400) continue; }
                 else { if (W < 16 || W > 160 || H < 16 || H > 160 || (W > H ? W - H : H - W) > 8 || atomic_load(&nbadge) >= 300) continue; atomic_fetch_add(&nbadge, 1); }
                 if (comp) {
                     nvgfx_wstrace("COMP draw enc %p fs %s tex %p %zux%zu fmt %lu %s fetch mask %#x zero %#x vertex0 %.1f %.1f screen %.1f %.1f vp %s%.4g %.4g %.4g %.4g sc %s%u %u %u %u target %ux%u surf %u nEnd %u",
                                   (__bridge void *)self, _ps->_fname.UTF8String, (__bridge void *)bt, W, H, (unsigned long)bt.pixelFormat, dock ? "dock" : "readback", _ps->_p.fetch_mask, _ps->_p.fetch_zero, vx, vy, sx, sy,
                                   _hasVP ? "" : "(default) ", _vp[0], _vp[1], _vp[2], _vp[3], _hasSC ? "" : "(default) ", _sc[0], _sc[1], _sc[2], _sc[3],
                                   tw0, _target ? [_target nvi]->h : 0u, (_target->_parent ?: _target)->_surf ? (unsigned)IOSurfaceGetID((_target->_parent ?: _target)->_surf) : 0u, (unsigned)_cb->_nEnd);
+                    if (dock) nvgfx_wstrace("COMP QUAD enc %p tex %p quad %.0f,%.0f %.0f,%.0f %.0f,%.0f %.0f,%.0f", (__bridge void *)self, (__bridge void *)bt, qx[0], qy[0], qx[1], qy[1], qx[2], qy[2], qx[3], qy[3]);
                     if (sx >= 0 && sy >= 0 && !objc_getAssociatedObject(self, NVGFX_DISPRB_KEY)) objc_setAssociatedObject(self, NVGFX_DISPRB_KEY, @[@(sx), @(sy)], OBJC_ASSOCIATION_RETAIN);
                     // N-119: everything an offline replay of this composite needs: constants, blend, vertices, matrices, uniforms, indices
                     if (dock || W >= 100 || H >= 100) {
@@ -2740,6 +2750,10 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                                     for (size_t c = 0; c < W * bpp2 && k + 3 < sizeof hx; c++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x", tp[r * W * bpp2 + c]);
                                     nvgfx_wstrace("COMP TEX %p row %zu: %s", (__bridge void *)bt, r, hx); }
                                 free(tp); } }
+                        if (dock && W >= 40 && W <= 160 && H >= 40 && H <= 160 && (bt.pixelFormat == MTLPixelFormatBGRA8Unorm || bt.pixelFormat == MTLPixelFormatRGBA16Float || bt.pixelFormat == MTLPixelFormatA8Unorm || bt.pixelFormat == MTLPixelFormatRGBA16Unorm)) {
+                            // N-125: the sampled texture read back when the GPU has finished this command buffer (an upload encoded earlier in the same buffer is invisible to getBytes at encode time)
+                            NSMutableArray *srcs = objc_getAssociatedObject(self, NVGFX_SRCRB_KEY); if (!srcs) { srcs = [NSMutableArray new]; objc_setAssociatedObject(self, NVGFX_SRCRB_KEY, srcs, OBJC_ASSOCIATION_RETAIN); }
+                            if (srcs.count < 6 && ![srcs containsObject:bt]) [srcs addObject:bt]; }
                         for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("COMP VBUF", _vbufAt, i, i == 1 ? 384 : 64);
                         for (unsigned i = 0; i <= 3; i++) nvgfx_cap_hex("COMP FBUF", _fbufAt, i, 512);
                         objc_setAssociatedObject(self, NVGFX_CAP_KEY, @YES, OBJC_ASSOCIATION_RETAIN);   // the draw call itself (indices) follows in CAP draw
@@ -3573,6 +3587,25 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
             }];
         }
     }
+    { NSMutableArray *srcs = objc_getAssociatedObject(self, NVGFX_SRCRB_KEY);
+      if (srcs && nvgfx_wstrace_on()) { objc_setAssociatedObject(self, NVGFX_SRCRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
+        static _Atomic unsigned nsrb; NVGFX_FRESH(nsrb); static NSMutableSet *sseen; static pthread_mutex_t smu = PTHREAD_MUTEX_INITIALIZER; static _Atomic unsigned sgen;
+        { unsigned g_ = atomic_load(&nvgfx_arm_gen); if (atomic_load(&sgen) != g_) { atomic_store(&sgen, g_); pthread_mutex_lock(&smu); [sseen removeAllObjects]; pthread_mutex_unlock(&smu); } }
+        for (NVMTLTexture *src in srcs) { NSUInteger W = src.width, H = src.height; unsigned long fmt = (unsigned long)src.pixelFormat; NSUInteger bpp = fmt == 115 || fmt == 110 ? 8 : fmt == 1 ? 1 : 4;
+            pthread_mutex_lock(&smu); if (!sseen) sseen = [NSMutableSet new]; NSValue *sk = [NSValue valueWithPointer:(__bridge void *)src]; BOOL seen = [sseen containsObject:sk]; if (!seen) [sseen addObject:sk]; pthread_mutex_unlock(&smu);
+            if (seen || atomic_fetch_add(&nsrb, 1) >= 24) continue;
+            id<MTLBuffer> rb = [[_cb device] newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
+            id<MTLBlitCommandEncoder> bl = [_cb blitCommandEncoder];
+            [bl copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:W * bpp destinationBytesPerImage:W * H * bpp];
+            [bl endEncoding]; void *encp = (__bridge void *)self;
+            nvgfx_wstrace("SRC SCHED enc %p tex %p %lux%lu fmt %lu", encp, (__bridge void *)src, (unsigned long)W, (unsigned long)H, fmt);
+            [_cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+                const uint8_t *p = rb.contents; size_t n = W * H * bpp, nz = 0; for (size_t q = 0; q < n; q++) if (p[q]) nz++;
+                nvgfx_wstrace("SRC READBACK %p %lux%lu fmt %lu status %ld nonzero %zu/%zu enc %p", (__bridge void *)src, (unsigned long)W, (unsigned long)H, fmt, (long)c.status, nz, n, encp);
+                for (NSUInteger r = 0; r < H; r++) { const uint8_t *row = p + r * W * bpp;
+                    for (NSUInteger half = 0; half < 2; half++) { char hx[700]; size_t kk = 0; NSUInteger from = half * (W * bpp / 2), to = half ? W * bpp : W * bpp / 2;
+                        for (NSUInteger c2 = from; c2 < to && kk + 3 < sizeof hx; c2++) kk += (size_t)snprintf(hx + kk, sizeof hx - kk, "%02x", row[c2]);
+                        nvgfx_wstrace("SRC %p row %lu/%lu: %s", (__bridge void *)src, (unsigned long)r, (unsigned long)half, hx); } } }]; } } }
     NSMutableDictionary *groups = [NSMutableDictionary new];
     BOOL needScratch = NO;
     for (NSArray *record in _visRecords) {
