@@ -2994,14 +2994,32 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     nvmtl_vk_bind_storage_view(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, nt->_stex ? [nt nvview] : NULL);
     }
 }
+// One pixel-sampler slot. Nothing changes (and the encoder's sampler-variant choice stands) when the slot already holds
+// this state with these clamps: ANGLE and Apple's GL renderer rebind the same sampler before every draw. The clamped
+// copy is what the variant key sees, as before. Slot keys are constant strings.
+static NSString *nvmtl_slot_key(NSUInteger i) {
+    static NSString *k[16]; static dispatch_once_t once;
+    dispatch_once(&once, ^{ for (int j = 0; j < 16; j++) k[j] = [NSString stringWithFormat:@"%d", j]; });
+    return i < 16 ? k[i] : [@(i) stringValue];
+}
+- (void)nvmtlPixelSampler:(int)stage index:(NSUInteger)i state:(NSDictionary *)ps lod:(BOOL)lod lo:(float)lo hi:(float)hi {
+    if (i >= 16 || _sampLod) return;
+    if (_sbase[stage][i] == ps && _slod[stage][i] == lod && (!lod || (_slo[stage][i] == lo && _shi[stage][i] == hi))) return;
+    NSMutableDictionary *d = stage ? _fragmentSamplers : _vertexSamplers;
+    if (!d) { d = [NSMutableDictionary new]; if (stage) _fragmentSamplers = d; else _vertexSamplers = d; }
+    NSString *key = nvmtl_slot_key(i);
+    if (!ps) [d removeObjectForKey:key];
+    else if (!lod) d[key] = ps;
+    else { NSMutableDictionary *m = [ps mutableCopy]; m[@"lod_min_clamp"] = @(lo); m[@"lod_max_clamp"] = @(hi); d[key] = m; }
+    _sbase[stage][i] = ps; _slod[stage][i] = lod; _slo[stage][i] = lo; _shi[stage][i] = hi;
+    _sampGen++;
+}
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i {
     NVMTLSamplerState *ns = (NVMTLSamplerState *)s;
     if (i >= 16 || nvmtl_vk_bind_sampler(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, ns ? &ns->_s : NULL)) {
         nvlog("setFragmentSamplerState: invalid index or bind failure"); return;
     }
-    if (!_fragmentSamplers) _fragmentSamplers=[NSMutableDictionary new];
-    NSString *key=[@(i) stringValue];
-    { id was=_fragmentSamplers[key], now=ns?ns->_pixelState:nil; if(was!=now) { _sampGen++; if(now) _fragmentSamplers[key]=now; else [_fragmentSamplers removeObjectForKey:key]; } }
+    [self nvmtlPixelSampler:1 index:i state:ns?ns->_pixelState:nil lod:NO lo:0 hi:0];
     nvtrace("FRAGMENT SAMPLER[%lu] pixel=%d bound=%d",(unsigned long)i,ns && ns->_pixelState!=nil,ns!=nil);
     if(ns) { if (!_cb->_resources) _cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:ns]; }
 }
@@ -3010,9 +3028,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     if (i >= 16 || nvmtl_vk_bind_sampler(&_cb->_c, NVMTL_SET_VERTEX, (uint32_t)i, ns ? &ns->_s : NULL)) {
         nvlog("setVertexSamplerState: invalid index or bind failure"); return;
     }
-    if (!_vertexSamplers) _vertexSamplers=[NSMutableDictionary new];
-    NSString *key=[@(i) stringValue];
-    { id was=_vertexSamplers[key], now=ns?ns->_pixelState:nil; if(was!=now) { _sampGen++; if(now) _vertexSamplers[key]=now; else [_vertexSamplers removeObjectForKey:key]; } }
+    [self nvmtlPixelSampler:0 index:i state:ns?ns->_pixelState:nil lod:NO lo:0 hi:0];
     nvtrace("VERTEX SAMPLER[%lu] pixel=%d bound=%d",(unsigned long)i,ns && ns->_pixelState!=nil,ns!=nil);
     if(ns) { if (!_cb->_resources) _cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:ns]; }
 }
@@ -3168,6 +3184,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 }
 - (void)endEncoding {
     _svFor=nil; _svSel=nil;   // nothing of this encoder outlives it (#107)
+    for (int st = 0; st < 2; st++) for (int j = 0; j < 16; j++) _sbase[st][j] = nil;
     _cb->_nEnd++;
     if (_dumpPso) { _dumpPso = NO; [self nvmtlDumpBoundFragmentBuffers]; }
     [self nvmtlCloseVisibility];
@@ -3374,20 +3391,14 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     for (NSUInteger k = 0; k < r.length; k++) [self setFragmentSamplerState:ss[k] atIndex:r.location + k];
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)ss lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)i {
-    [self setFragmentSamplerState:ss atIndex:i];
-    NSString *key=[@(i) stringValue];
-    if(_fragmentSamplers[key]) {
-        NSMutableDictionary *state=[_fragmentSamplers[key] mutableCopy];
-        state[@"lod_min_clamp"]=@(lo);state[@"lod_max_clamp"]=@(hi);_fragmentSamplers[key]=state;_sampGen++;
-    }
+    _sampLod = YES; [self setFragmentSamplerState:ss atIndex:i]; _sampLod = NO;
+    NVMTLSamplerState *ns = (NVMTLSamplerState *)ss;
+    [self nvmtlPixelSampler:1 index:i state:ns?ns->_pixelState:nil lod:YES lo:lo hi:hi];
 }
 - (void)setVertexSamplerState:(id<MTLSamplerState>)ss lodMinClamp:(float)lo lodMaxClamp:(float)hi atIndex:(NSUInteger)i {
-    [self setVertexSamplerState:ss atIndex:i];
-    NSString *key=[@(i) stringValue];
-    if(_vertexSamplers[key]) {
-        NSMutableDictionary *state=[_vertexSamplers[key] mutableCopy];
-        state[@"lod_min_clamp"]=@(lo);state[@"lod_max_clamp"]=@(hi);_vertexSamplers[key]=state;_sampGen++;
-    }
+    _sampLod = YES; [self setVertexSamplerState:ss atIndex:i]; _sampLod = NO;
+    NVMTLSamplerState *ns = (NVMTLSamplerState *)ss;
+    [self nvmtlPixelSampler:0 index:i state:ns?ns->_pixelState:nil lod:YES lo:lo hi:hi];
 }
 - (void)setFragmentSamplerStates:(const id<MTLSamplerState> __unsafe_unretained [])ss lodMinClamps:(const float *)lo lodMaxClamps:(const float *)hi withRange:(NSRange)r {
     for(NSUInteger k=0;k<r.length;k++) [self setFragmentSamplerState:ss[k] lodMinClamp:lo[k] lodMaxClamp:hi[k] atIndex:r.location+k];

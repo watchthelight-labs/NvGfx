@@ -198,6 +198,8 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
   NSMutableDictionary *_vertexSamplers, *_fragmentSamplers;
   // the sampler-variant choice for (_svFor, _sampGen): _sampGen moves only when a bound pixel sampler changes
   uint32_t _sampGen, _svGen; NVMTLRenderPipelineState *_svFor; id _svSel;
+  // what each pixel-sampler slot holds now ([0] vertex, [1] fragment): the base state and the LOD clamps put on it
+  BOOL _sampLod; id _sbase[2][16]; float _slo[2][16], _shi[2][16]; uint8_t _slod[2][16];
   NSMutableDictionary *_vbufAt, *_fbufAt;
   NVMTLRenderPipelineState *_ps;
   NSMutableArray *_scratch;
