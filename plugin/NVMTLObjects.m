@@ -2730,6 +2730,9 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                                   _hasVP ? "" : "(default) ", _vp[0], _vp[1], _vp[2], _vp[3], _hasSC ? "" : "(default) ", _sc[0], _sc[1], _sc[2], _sc[3],
                                   tw0, _target ? [_target nvi]->h : 0u, (_target->_parent ?: _target)->_surf ? (unsigned)IOSurfaceGetID((_target->_parent ?: _target)->_surf) : 0u, (unsigned)_cb->_nEnd);
                     if (dock) nvgfx_wstrace("COMP QUAD enc %p tex %p quad %.0f,%.0f %.0f,%.0f %.0f,%.0f %.0f,%.0f", (__bridge void *)self, (__bridge void *)bt, qx[0], qy[0], qx[1], qy[1], qx[2], qy[2], qx[3], qy[3]);
+                    if (dock && (W >= 40 || H >= 40)) {   // N-127: the sampler states bound for this draw (mip filter, lod clamps) and the texture's mip count
+                        NSString *s0 = [[_fragmentSamplers[@0] description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "], *s1 = [[_fragmentSamplers[@1] description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+                        nvgfx_wstrace("COMP SAMPLER enc %p tex %p mips %lu s0 %s s1 %s", (__bridge void *)self, (__bridge void *)bt, (unsigned long)bt.mipmapLevelCount, s0.UTF8String ?: "-", s1.UTF8String ?: "-"); }
                     if (sx >= 0 && sy >= 0 && !objc_getAssociatedObject(self, NVGFX_DISPRB_KEY)) objc_setAssociatedObject(self, NVGFX_DISPRB_KEY, @[@(sx), @(sy)], OBJC_ASSOCIATION_RETAIN);
                     // N-119: everything an offline replay of this composite needs: constants, blend, vertices, matrices, uniforms, indices
                     if (dock || W >= 100 || H >= 100) {
@@ -3591,21 +3594,24 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
       if (srcs && nvgfx_wstrace_on()) { objc_setAssociatedObject(self, NVGFX_SRCRB_KEY, nil, OBJC_ASSOCIATION_RETAIN);
         static _Atomic unsigned nsrb; NVGFX_FRESH(nsrb); static NSMutableSet *sseen; static pthread_mutex_t smu = PTHREAD_MUTEX_INITIALIZER; static _Atomic unsigned sgen;
         { unsigned g_ = atomic_load(&nvgfx_arm_gen); if (atomic_load(&sgen) != g_) { atomic_store(&sgen, g_); pthread_mutex_lock(&smu); [sseen removeAllObjects]; pthread_mutex_unlock(&smu); } }
-        for (NVMTLTexture *src in srcs) { NSUInteger W = src.width, H = src.height; unsigned long fmt = (unsigned long)src.pixelFormat; NSUInteger bpp = fmt == 115 || fmt == 110 ? 8 : fmt == 1 ? 1 : 4;
+        for (NVMTLTexture *src in srcs) { NSUInteger W0 = src.width, H0 = src.height; unsigned long fmt = (unsigned long)src.pixelFormat; NSUInteger bpp = fmt == 115 || fmt == 110 ? 8 : fmt == 1 ? 1 : 4;
             pthread_mutex_lock(&smu); if (!sseen) sseen = [NSMutableSet new]; NSValue *sk = [NSValue valueWithPointer:(__bridge void *)src]; BOOL seen = [sseen containsObject:sk]; if (!seen) [sseen addObject:sk]; pthread_mutex_unlock(&smu);
             if (seen || atomic_fetch_add(&nsrb, 1) >= 24) continue;
-            id<MTLBuffer> rb = [[_cb device] newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
-            id<MTLBlitCommandEncoder> bl = [_cb blitCommandEncoder];
-            [bl copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:W * bpp destinationBytesPerImage:W * H * bpp];
-            [bl endEncoding]; void *encp = (__bridge void *)self;
-            nvgfx_wstrace("SRC SCHED enc %p tex %p %lux%lu fmt %lu", encp, (__bridge void *)src, (unsigned long)W, (unsigned long)H, fmt);
-            [_cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
-                const uint8_t *p = rb.contents; size_t n = W * H * bpp, nz = 0; for (size_t q = 0; q < n; q++) if (p[q]) nz++;
-                nvgfx_wstrace("SRC READBACK %p %lux%lu fmt %lu status %ld nonzero %zu/%zu enc %p", (__bridge void *)src, (unsigned long)W, (unsigned long)H, fmt, (long)c.status, nz, n, encp);
-                for (NSUInteger r = 0; r < H; r++) { const uint8_t *row = p + r * W * bpp;
-                    for (NSUInteger half = 0; half < 2; half++) { char hx[700]; size_t kk = 0; NSUInteger from = half * (W * bpp / 2), to = half ? W * bpp : W * bpp / 2;
-                        for (NSUInteger c2 = from; c2 < to && kk + 3 < sizeof hx; c2++) kk += (size_t)snprintf(hx + kk, sizeof hx - kk, "%02x", row[c2]);
-                        nvgfx_wstrace("SRC %p row %lu/%lu: %s", (__bridge void *)src, (unsigned long)r, (unsigned long)half, hx); } } }]; } } }
+            NSUInteger nlev = src.mipmapLevelCount; if (nlev > 3) nlev = 3;   // N-127: levels 1 and 2 too (the digit texture has 7 and is drawn minified)
+            void *encp = (__bridge void *)self;
+            nvgfx_wstrace("SRC SCHED enc %p tex %p %lux%lu fmt %lu mips %lu %s", encp, (__bridge void *)src, (unsigned long)W0, (unsigned long)H0, fmt, (unsigned long)src.mipmapLevelCount, nvgfx_img_desc([src nvi]));
+            for (NSUInteger lev = 0; lev < nlev; lev++) { NSUInteger W = W0 >> lev ? W0 >> lev : 1, H = H0 >> lev ? H0 >> lev : 1;
+                id<MTLBuffer> rb = [[_cb device] newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
+                id<MTLBlitCommandEncoder> bl = [_cb blitCommandEncoder];
+                [bl copyFromTexture:src sourceSlice:0 sourceLevel:lev sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:W * bpp destinationBytesPerImage:W * H * bpp];
+                [bl endEncoding];
+                [_cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+                    const uint8_t *p = rb.contents; size_t n = W * H * bpp, nz = 0; for (size_t q = 0; q < n; q++) if (p[q]) nz++;
+                    nvgfx_wstrace("SRC READBACK %p level %lu %lux%lu fmt %lu status %ld nonzero %zu/%zu enc %p", (__bridge void *)src, (unsigned long)lev, (unsigned long)W, (unsigned long)H, fmt, (long)c.status, nz, n, encp);
+                    for (NSUInteger r = 0; r < H; r++) { const uint8_t *row = p + r * W * bpp;
+                        for (NSUInteger half = 0; half < 2; half++) { char hx[700]; size_t kk = 0; NSUInteger from = half * (W * bpp / 2), to = half ? W * bpp : W * bpp / 2;
+                            for (NSUInteger c2 = from; c2 < to && kk + 3 < sizeof hx; c2++) kk += (size_t)snprintf(hx + kk, sizeof hx - kk, "%02x", row[c2]);
+                            nvgfx_wstrace("SRC %p L%lu row %lu/%lu: %s", (__bridge void *)src, (unsigned long)lev, (unsigned long)r, (unsigned long)half, hx); } } }]; } } } }
     NSMutableDictionary *groups = [NSMutableDictionary new];
     BOOL needScratch = NO;
     for (NSArray *record in _visRecords) {
@@ -5112,6 +5118,8 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
     [_cb->_resources addObject:t];
     { int was = nvtrace_scope([t nvi]->w, [t nvi]->h); nvtrace("MIPS tex %ux%u surf %u", [t nvi]->w, [t nvi]->h, nvmtl_surf_id(t)); g_trace_mute = was; }
     nvmtl_surface_in_for_cb(_cb, t); nvmtl_surf_dirty(_cb, t);
+    if (nvgfx_wstrace_on()) { static _Atomic unsigned ngm; NVGFX_FRESH(ngm); if (atomic_fetch_add(&ngm, 1) < 200)
+        nvgfx_wstrace("GENMIPS tex %p %ux%u fmt %lu mips %lu cb %p", (__bridge void *)t, [t nvi]->w, [t nvi]->h, (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, (__bridge void *)_cb); }   // N-127
     if (nvmtl_vk_cmd_image_gen_mipmaps(&_cb->_c, [t nvi])) nvlog("generateMipmapsForTexture: FAILED");
 }
 - (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl toTexture:(id<MTLTexture>)dst
