@@ -2731,7 +2731,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                                   tw0, _target ? [_target nvi]->h : 0u, (_target->_parent ?: _target)->_surf ? (unsigned)IOSurfaceGetID((_target->_parent ?: _target)->_surf) : 0u, (unsigned)_cb->_nEnd);
                     if (dock) nvgfx_wstrace("COMP QUAD enc %p tex %p quad %.0f,%.0f %.0f,%.0f %.0f,%.0f %.0f,%.0f", (__bridge void *)self, (__bridge void *)bt, qx[0], qy[0], qx[1], qy[1], qx[2], qy[2], qx[3], qy[3]);
                     if (dock && (W >= 40 || H >= 40)) {   // N-127: the sampler states bound for this draw (mip filter, lod clamps) and the texture's mip count
-                        NSString *s0 = [[_fragmentSamplers[@0] description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "], *s1 = [[_fragmentSamplers[@1] description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+                        NSString *s0 = [[_fragmentSamplers[@"0"] description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "], *s1 = [[_fragmentSamplers[@"1"] description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "];   // keyed by the index as a string
                         nvgfx_wstrace("COMP SAMPLER enc %p tex %p mips %lu s0 %s s1 %s", (__bridge void *)self, (__bridge void *)bt, (unsigned long)bt.mipmapLevelCount, s0.UTF8String ?: "-", s1.UTF8String ?: "-"); }
                     if (sx >= 0 && sy >= 0 && !objc_getAssociatedObject(self, NVGFX_DISPRB_KEY)) objc_setAssociatedObject(self, NVGFX_DISPRB_KEY, @[@(sx), @(sy)], OBJC_ASSOCIATION_RETAIN);
                     // N-119: everything an offline replay of this composite needs: constants, blend, vertices, matrices, uniforms, indices
