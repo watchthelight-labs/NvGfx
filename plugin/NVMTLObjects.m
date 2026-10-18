@@ -2779,8 +2779,8 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 if (first && (bt.pixelFormat == MTLPixelFormatBGRA8Unorm || bt.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)) {
                     uint8_t *px = (uint8_t *)calloc(W * H, 4);
                     if (px) { [bt getBytes:px bytesPerRow:W * 4 fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
-                        for (size_t r = H / 4; r < H; r += H / 4) { char hx[1400]; size_t k = 0;
-                            for (size_t c = 0; c < W; c++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x%02x%02x%02x", px[(r * W + c) * 4 + 2], px[(r * W + c) * 4 + 1], px[(r * W + c) * 4], px[(r * W + c) * 4 + 3]);
+                        for (size_t r = H / 4; r < H; r += H / 4) { char hx[1400]; size_t k = 0;   // N-126: bounded (a 1984 px Dock composite overflowed it, WindowServer crashed in N-125)
+                            for (size_t c = 0; c < W && k + 9 < sizeof hx; c++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x%02x%02x%02x", px[(r * W + c) * 4 + 2], px[(r * W + c) * 4 + 1], px[(r * W + c) * 4], px[(r * W + c) * 4 + 3]);
                             nvgfx_wstrace("BADGE TEX %p row %zu/%zu (RGBA): %s", (__bridge void *)bt, r, H, hx); }
                         free(px); }
                 }
@@ -2817,7 +2817,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                         size_t W = st.width, H = st.height; uint8_t *px = (uint8_t *)calloc(W * H, 4);
                         if (px) { [st getBytes:px bytesPerRow:W * 4 fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
                             for (size_t r = 0; r < H; r++) for (size_t c0 = 0; c0 < W; c0 += 48) { char hx[400]; size_t k = 0;
-                                for (size_t c = c0; c < W && c < c0 + 48; c++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x%02x%02x", px[(r * W + c) * 4 + 2], px[(r * W + c) * 4 + 1], px[(r * W + c) * 4]);
+                                for (size_t c = c0; c < W && c < c0 + 48 && k + 7 < sizeof hx; c++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02x%02x%02x", px[(r * W + c) * 4 + 2], px[(r * W + c) * 4 + 1], px[(r * W + c) * 4]);
                                 nvgfx_wstrace("CAP SRC3 %zux%zu row %zu col %zu (RGB): %s", W, H, r, c0, hx); }
                             free(px); }
                     }
