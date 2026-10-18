@@ -2872,14 +2872,16 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                 static _Atomic int alltex; static _Atomic long atchk; { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
                     if (ts.tv_sec != atomic_load(&atchk)) { atomic_store(&atchk, ts.tv_sec); atomic_store(&alltex, access("/tmp/nvmtl-alltex", F_OK) == 0 || access("/Library/GPUBundles/nvmtl/wstrace.alltex", F_OK) == 0); } }
                 const size_t lim = atomic_load(&alltex) ? 512 : 256;
-                if (!((pf == 1 || pf == 30) || (atomic_load(&alltex) && pf == 80)) || W > lim || H > lim) continue;
+                // N-124: the Dock badge digit is a 15x30 RGBA16Unorm (fmt 110) image; 16-bit sources count as glyphs too
+                const BOOL wide = (pf == 110 || pf == 115) && W <= 64 && H <= 64;
+                if (!((pf == 1 || pf == 30) || wide || (atomic_load(&alltex) && pf == 80)) || W > lim || H > lim) continue;
                 // once per texture object (the clock text redraws every second and would eat any per-draw budget)
                 { static _Atomic unsigned gen_; unsigned g_ = atomic_load(&nvgfx_arm_gen); if (atomic_load(&gen_) != g_) { atomic_store(&gen_, g_); pthread_mutex_lock(&gmu); [gseen removeAllObjects]; pthread_mutex_unlock(&gmu); } }
                 pthread_mutex_lock(&gmu); if (!gseen) gseen = [NSMutableSet new];
                 NSValue *gk = [NSValue valueWithPointer:(__bridge void *)bt]; BOOL gfirst = ![gseen containsObject:gk] && gseen.count < 200; if (gfirst) [gseen addObject:gk];
                 pthread_mutex_unlock(&gmu);
                 if (!gfirst) continue;
-                NVMTLTexture *rt = bt->_parent ?: bt; unsigned bpp = pf == 1 ? 1 : pf == 80 ? 4 : 2;
+                NVMTLTexture *rt = bt->_parent ?: bt; unsigned bpp = pf == 1 ? 1 : pf == 80 ? 4 : wide ? 8 : 2;
                 nvgfx_wstrace("OFFS GLYPH enc %p slot %d %p %zux%zu fmt %lu swz %d key %#x view %d surf %u parent %d usage %lu storage %lu", (__bridge void *)self, slot.intValue,
                               (__bridge void *)bt, W, H, pf, rt->_hasSwz, [bt swizzleKey], bt->_swzView != NULL, rt->_surf ? (unsigned)IOSurfaceGetID(rt->_surf) : 0u,
                               bt->_parent != nil, (unsigned long)bt.usage, (unsigned long)bt.storageMode);
@@ -2895,7 +2897,7 @@ static BOOL nvgfx_ws_interesting(NSString *n)
                     free(px); }
                 nvgfx_cap_hex("OFFS VBUF", _vbufAt, 1, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 0, 192); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 2, 64); nvgfx_cap_hex("OFFS VBUF", _vbufAt, 3, 64);   // N-102: mvp and texture_matrix too
                 // N-117: badge-like passes only (a pill or a small glyph into a small offscreen); N-103: read the target back when this pass ends
-                if (([_target nvi]->w <= 256 && [_target nvi]->h <= 384 && ((pf == 30 && W <= 64) || (pf == 80 && W <= 64 && H <= 64)))
+                if (([_target nvi]->w <= 256 && [_target nvi]->h <= 384 && ((pf == 30 && W <= 64) || (pf == 80 && W <= 64 && H <= 64) || wide))
                     || (_target.pixelFormat == MTLPixelFormatA8Unorm && [_target nvi]->w <= 128 && [_target nvi]->h <= 128)) { objc_setAssociatedObject(self, NVGFX_TGTRB_KEY, @YES, OBJC_ASSOCIATION_RETAIN);
                     nvgfx_wstrace("TGT FLAG enc %p target %p %ux%u fmt %lu glyph %zux%zu fmt %lu", (__bridge void *)self, (__bridge void *)_target, [_target nvi]->w, [_target nvi]->h, (unsigned long)_target.pixelFormat, W, H, pf);
                     { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); atomic_store(&gNvgfxLabelNs, (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec); }
