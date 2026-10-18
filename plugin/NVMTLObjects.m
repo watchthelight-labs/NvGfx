@@ -1394,6 +1394,9 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
 }
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level withBytes:(const void *)bytes bytesPerRow:(NSUInteger)row {
     if (level >= [self mipmapLevelCount]) { nvlog("replaceRegion: mip level %lu — this texture has %lu", (unsigned long)level, (unsigned long)[self mipmapLevelCount]); return; }
+    if (nvgfx_wstrace_on() && [self mipmapLevelCount] > 1) { static _Atomic unsigned nrr; NVGFX_FRESH(nrr); if (atomic_fetch_add(&nrr, 1) < 300)   // N-129: uploads into mipmapped textures (the badge digit)
+        nvgfx_wstrace("MIPUP replace tex %p %lux%lu fmt %lu mips %lu level %lu region %lu,%lu %lux%lu row %lu", (__bridge void *)self, (unsigned long)self.width, (unsigned long)self.height, (unsigned long)self.pixelFormat,
+                      (unsigned long)self.mipmapLevelCount, (unsigned long)level, (unsigned long)region.origin.x, (unsigned long)region.origin.y, (unsigned long)region.size.width, (unsigned long)region.size.height, (unsigned long)row); }
     if (region.size.depth > 1 || region.origin.z) { [self replaceRegion:region mipmapLevel:level slice:0 withBytes:bytes bytesPerRow:row bytesPerImage:row * region.size.height]; return; }
     { int was = nvtrace_scope([self nvi]->w, [self nvi]->h);
       if (nvmtl_trace_on()) { unsigned nz, nn; size_t valid = (size_t)region.size.width * [self nvi]->bpp; if (row && valid > row) valid = row;
@@ -1469,6 +1472,9 @@ static uint32_t nvmtl_tex_attach_vkfmt(NVMTLTexture *t, int *a8) {
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)f textureType:(MTLTextureType)tt
                                          levels:(NSRange)levels slices:(NSRange)slices {
+    if (nvgfx_wstrace_on() && self.mipmapLevelCount > 1) { static _Atomic unsigned nlv; NVGFX_FRESH(nlv); if (atomic_fetch_add(&nlv, 1) < 300)   // N-129
+        nvgfx_wstrace("MIPVIEW tex %p %lux%lu fmt %lu mips %lu -> view fmt %lu type %lu levels %lu+%lu slices %lu+%lu", (__bridge void *)self, (unsigned long)self.width, (unsigned long)self.height, (unsigned long)self.pixelFormat,
+                      (unsigned long)self.mipmapLevelCount, (unsigned long)f, (unsigned long)tt, (unsigned long)levels.location, (unsigned long)levels.length, (unsigned long)slices.location, (unsigned long)slices.length); }
     NSUInteger availableSlices = self.textureType == MTLTextureTypeCube ? 6 : self.textureType == MTLTextureTypeCubeArray ? self.arrayLength * 6 : self.arrayLength;
     if (!levels.length || levels.location >= self.mipmapLevelCount || levels.length > self.mipmapLevelCount - levels.location ||
         !slices.length || slices.location >= availableSlices || slices.length > availableSlices - slices.location) return nil;
@@ -4892,11 +4898,11 @@ static void nvmtl_zprobe_drain(void) {
 }
 - (void)dispatchThreadgroups:(MTLSize)grid threadsPerThreadgroup:(MTLSize)tg {
     if (nvgfx_wstrace_on() && _ps) {   // N-97: which kernels WindowServer runs (an SDF field could be generated here)
-        static _Atomic unsigned ndisp;
+        static _Atomic unsigned ndisp; NVGFX_FRESH(ndisp);   // N-129: per arming (the lifetime budget was long spent in WindowServer)
         if (atomic_fetch_add(&ndisp, 1) < 2000) {
             NSMutableString *tx = [NSMutableString string];
-            for (NSNumber *k in [_sassTextures.allKeys sortedArrayUsingSelector:@selector(compare:)]) { id<MTLTexture> t = _sassTextures[k];
-                [tx appendFormat:@" %@=%lux%lu/%lu", k, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat]; }
+            for (NSNumber *k in [_sassTextures.allKeys sortedArrayUsingSelector:@selector(compare:)]) { NVMTLTexture *t = _sassTextures[k];
+                [tx appendFormat:@" %@=%lux%lu/%lu m%lu b%u%s", k, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, t->_baseLevel, t->_parent ? "v" : ""]; }
             nvgfx_wstrace("DISPATCH %s grid %lux%lux%lu tg %lux%lux%lu tex%s", _ps->_function->_fname.UTF8String ?: "?", (unsigned long)grid.width,
                           (unsigned long)grid.height, (unsigned long)grid.depth, (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth,
                           tx.length ? tx.UTF8String : " -");
@@ -5168,6 +5174,9 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
       destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dof {
     NVMTLBuffer *b = (NVMTLBuffer *)src; NVMTLTexture *t = (NVMTLTexture *)dst;
     if (!b || !t) { nvlog("blit copyFromBuffer:toTexture: nil"); return; }
+    if (nvgfx_wstrace_on() && t.mipmapLevelCount > 1) { static _Atomic unsigned nbt; NVGFX_FRESH(nbt); if (atomic_fetch_add(&nbt, 1) < 300)   // N-129
+        nvgfx_wstrace("MIPUP blit tex %p %lux%lu fmt %lu mips %lu level %lu slice %lu at %lu,%lu size %lux%lu row %lu cb %p", (__bridge void *)t, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat,
+                      (unsigned long)t.mipmapLevelCount, (unsigned long)dl, (unsigned long)ds, (unsigned long)dof.x, (unsigned long)dof.y, (unsigned long)size.width, (unsigned long)size.height, (unsigned long)row, (__bridge void *)_cb); }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:b];
     [_cb->_resources addObject:t];
@@ -5343,9 +5352,9 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
             BOOL oddlbl = strcasestr(lb, "sdf") || strcasestr(lb, "capture") || strcasestr(lb, "offscreen") || strcasestr(lb, "iosurface") || strcasestr(lb, "scratch");
             BOOL big = t0.width >= 1280 || t0.height >= 800;
             if ((oddfmt || oddlbl || (big && tr->_surf)) ? atomic_fetch_add(&odd, 1) < 6000 : (!big && atomic_fetch_add(&small, 1) < 6000))
-                nvgfx_wstrace("render pass target %lux%lu fmt %lu level %lu load %lu store %lu surf %u%s label '%s'", (unsigned long)t0.width, (unsigned long)t0.height, pf,
+                nvgfx_wstrace("render pass target %lux%lu fmt %lu level %lu load %lu store %lu surf %u%s label '%s' tex %p mips %lu base %u", (unsigned long)t0.width, (unsigned long)t0.height, pf,
                               (unsigned long)d.colorAttachments[0].level, (unsigned long)d.colorAttachments[0].loadAction, (unsigned long)d.colorAttachments[0].storeAction,
-                              tr->_surf ? (unsigned)IOSurfaceGetID(tr->_surf) : 0u, tr->_vramOn ? " vram" : "", lb);
+                              tr->_surf ? (unsigned)IOSurfaceGetID(tr->_surf) : 0u, tr->_vramOn ? " vram" : "", lb, (__bridge void *)t0, (unsigned long)t0.mipmapLevelCount, ((NVMTLTexture *)t0)->_baseLevel);
         }
     }
     if (!_resources) _resources = [NVMTLResSet new];
