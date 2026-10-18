@@ -208,6 +208,8 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
     X(vkDestroyBuffer) X(vkFreeMemory) X(vkDestroyImage) X(vkDestroyImageView) X(vkDestroyFramebuffer) X(vkDestroyCommandPool) \
     X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask)
 static int g_dyn3;
+static int g_provoking;   /* provoking vertex is per-draw dynamic state, and the last vertex can provoke */
+static PFN_vkCmdSetProvokingVertexModeEXT pvkCmdSetProvokingVertexModeEXT;
 static int g_tess;
 static int g_indep;
 static int g_a2one;
@@ -767,20 +769,21 @@ static int nvmtl_vk_initialize(void)
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, g_qfam, 1, &prio };
 
-    static const char *kWant[14] = { "VK_EXT_extended_dynamic_state3", "VK_EXT_depth_clip_enable", "VK_EXT_memory_budget",
+    static const char *kWant[15] = { "VK_EXT_extended_dynamic_state3", "VK_EXT_depth_clip_enable", "VK_EXT_memory_budget",
                                     "VK_KHR_acceleration_structure", "VK_KHR_ray_query", "VK_KHR_deferred_host_operations",
                                     "VK_EXT_external_memory_host",
                                     "VK_EXT_image_drm_format_modifier",
                                     "VK_KHR_external_memory_fd",
-                                    "VK_EXT_mutable_descriptor_type", "VK_KHR_cooperative_matrix", "VK_EXT_calibrated_timestamps", "VK_EXT_sample_locations", "VK_KHR_pipeline_executable_properties"  };
-    const char *exts[14]; uint32_t next = 0; int have[14] = {0};
+                                    "VK_EXT_mutable_descriptor_type", "VK_KHR_cooperative_matrix", "VK_EXT_calibrated_timestamps", "VK_EXT_sample_locations", "VK_KHR_pipeline_executable_properties",
+                                    "VK_EXT_provoking_vertex" };
+    const char *exts[15]; uint32_t next = 0; int have[15] = {0};
     uint32_t na = 0;
     if (pvkEnumerateDeviceExtensionProperties &&
         pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, NULL) == VK_SUCCESS && na) {
         VkExtensionProperties *props = calloc(na, sizeof *props);
         if (props && pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, props) == VK_SUCCESS)
             for (uint32_t i = 0; i < na; i++)
-                for (int w = 0; w < 14; w++)
+                for (int w = 0; w < 15; w++)
                     if (!have[w] && !strcmp(props[i].extensionName, kWant[w])) { have[w] = 1; exts[next++] = kWant[w]; }
         free(props);
     }
@@ -824,6 +827,22 @@ static int nvmtl_vk_initialize(void)
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT dyn3 = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT, g_clip ? (void *)&clipf : (void *)&v11 };
     dyn3.extendedDynamicState3PolygonMode = VK_TRUE;
+    // Apple's GL renderer draws with GL's last-vertex convention; with this it says so per encoder instead of rewriting
+    // every indexed draw's index buffer in a compute pass (see nvmtl_gl_caps_patch). Ported from NullMoth 2.3.6.
+    static VkPhysicalDeviceProvokingVertexFeaturesEXT pvf;
+    if (g_dyn3 && have[14]) {
+        PFN_vkGetPhysicalDeviceFeatures2 gpf = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
+        VkPhysicalDeviceProvokingVertexFeaturesEXT qpv = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT };
+        VkPhysicalDeviceExtendedDynamicState3FeaturesEXT q3 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT, &qpv };
+        VkPhysicalDeviceFeatures2 qf2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &q3 };
+        if (gpf) gpf(g_pdev, &qf2);
+        g_provoking = qpv.provokingVertexLast && q3.extendedDynamicState3ProvokingVertexMode;
+        if (g_provoking) {
+            dyn3.extendedDynamicState3ProvokingVertexMode = VK_TRUE;
+            pvf = (VkPhysicalDeviceProvokingVertexFeaturesEXT){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT, dyn3.pNext, VK_TRUE, VK_FALSE };
+            dyn3.pNext = &pvf;
+        }
+    }
     if (g_clip) dyn3.extendedDynamicState3DepthClipEnable = VK_TRUE;
     {
         PFN_vkGetPhysicalDeviceFeatures2 gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
@@ -1003,6 +1022,11 @@ static int nvmtl_vk_initialize(void)
         pvkCmdSetPolygonModeEXT = (PFN_vkCmdSetPolygonModeEXT)pvkGetDeviceProcAddr(g_dev, "vkCmdSetPolygonModeEXT");
         if (!pvkCmdSetPolygonModeEXT) { nvlog("vk: the extension is enabled but vkCmdSetPolygonModeEXT is missing — fill mode stays static"); g_dyn3 = 0; }
     }
+    if (g_provoking) {
+        pvkCmdSetProvokingVertexModeEXT = (PFN_vkCmdSetProvokingVertexModeEXT)pvkGetDeviceProcAddr(g_dev, "vkCmdSetProvokingVertexModeEXT");
+        if (!pvkCmdSetProvokingVertexModeEXT || !g_dyn3) g_provoking = 0;
+    }
+    nvlog("vk: provoking vertex %s", g_provoking ? "dynamic, first or last (Apple GL's setProvokingVertexMode:)" : "first only");
     if (g_clip) {
         pvkCmdSetDepthClipEnableEXT = (PFN_vkCmdSetDepthClipEnableEXT)pvkGetDeviceProcAddr(g_dev, "vkCmdSetDepthClipEnableEXT");
         if (!pvkCmdSetDepthClipEnableEXT) { nvlog("vk: vkCmdSetDepthClipEnableEXT is missing — depth clip mode stays static"); g_clip = 0; }
@@ -4021,12 +4045,13 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
         VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK };
     VkPipelineDynamicStateCreateInfo dsci = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, NULL, 0,
         hasDepth ? (out->has_stencil ? 16u : 12u) : 9u, dyn };
-    VkDynamicState dyn3s[18];
+    VkDynamicState dyn3s[19];
     if (g_dyn3) {
         uint32_t n3 = 0;
         for (uint32_t i = 0; i < (hasDepth ? (out->has_stencil ? 16u : 12u) : 9u); i++) dyn3s[n3++] = dyn[i];
         dyn3s[n3++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
         if (g_clip) dyn3s[n3++] = VK_DYNAMIC_STATE_DEPTH_CLIP_ENABLE_EXT;
+        if (g_provoking) dyn3s[n3++] = VK_DYNAMIC_STATE_PROVOKING_VERTEX_MODE_EXT;
         dsci.pDynamicStates = dyn3s; dsci.dynamicStateCount = n3;
     }
     VkDynamicState dynv[20];
@@ -5312,7 +5337,7 @@ int nvmtl_vk_cmd_set_topology(nvk_cmdbuf *c, unsigned mtlType) {
         "dynamicPrimitiveTopologyUnrestricted, which this device does not report — NOT drawn (was: rasterised as triangles)"); return -1; }
     c->topo = mtlType;
     pvkCmdSetPrimitiveTopology(c->cb, map[mtlType]);
-    pvkCmdSetPrimitiveRestartEnable(c->cb, (mtlType == 2 || mtlType == 4) ? VK_TRUE : VK_FALSE);
+    pvkCmdSetPrimitiveRestartEnable(c->cb, (mtlType == 2 || mtlType == 4) && !c->restart_off ? VK_TRUE : VK_FALSE);
     if (mtlType != 3) { static int told[5]; if (!told[mtlType]++) nvlog("G14 first draw of MTLPrimitiveType %u in this process", mtlType); }
     return 0;
 }
@@ -6701,6 +6726,12 @@ int nvmtl_vk_bind_storage_view(nvk_cmdbuf *c, uint32_t set, uint32_t index, void
 }
 
 int nvmtl_vk_have_polygon_mode(void) { return g_dyn3; }
+int nvmtl_vk_have_provoking_last(void) { return g_provoking; }
+void nvmtl_vk_cmd_set_provoking_last(nvk_cmdbuf *c, int last)
+{
+    if (g_provoking)
+        pvkCmdSetProvokingVertexModeEXT(c->cb, last ? VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT : VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT);
+}
 int nvmtl_vk_cmd_set_polygon_mode(nvk_cmdbuf *c, int line)
 {
     if (!g_dyn3 || !pvkCmdSetPolygonModeEXT) return -1;

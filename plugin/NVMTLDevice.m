@@ -39,6 +39,7 @@ static inline FILE *nvmtl_rel_fopen(const char *p, const char *m) { return nvmtl
 #define fopen(p, m) nvmtl_rel_fopen(p, m)
 #endif
 int nvmtl_vk_init(void);
+void nvmtl_gl_caps_enable(void);
 uint16_t nvmtl_vk_set_accelerator(mach_port_t accelerator);
 uint16_t nvmtl_vk_vendor(void);
 const char *nvmtl_vk_device_name(void);
@@ -470,6 +471,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
         nvlog("  NVK did not come up in this process - refusing to be the Metal device for %s", getprogname());
         return nil;
     }
+    nvmtl_gl_caps_enable();
     if (nvmtl_vk_vendor() == 0x10de) {   /* NVDEC/NVENC are NVIDIA engines reached through NVRM */
         nvmtl_nvdec_register();
         nvmtl_nvenc_register();

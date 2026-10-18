@@ -4875,6 +4875,9 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     nvmtl_vk_cmd_set_blend_color(&_c, defaultBlend);
     nvmtl_vk_cmd_set_line_width(&_c, 1.0f);
     (void)nvmtl_vk_cmd_set_polygon_mode(&_c, 0);
+    // Metal encoder state starts fresh even when the command buffer also holds an earlier GL render pass.
+    _c.restart_off = 0;
+    nvmtl_vk_cmd_set_provoking_last(&_c, 0);
     (void)nvmtl_vk_cmd_set_depth_clip(&_c, 1);
     e->_visBuf = (NVMTLBuffer *)d.visibilityResultBuffer;
     MTLClearColor cc = d.colorAttachments[0].clearColor;
