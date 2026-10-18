@@ -9,6 +9,9 @@ The `nvgfx` branch is NullMoth's 2.1.0 plus the changes in the README table. Thi
   (`package.sh` writes the label into `NVGFX-VERSION`). Carried over from `nvgfx`: the build harness (`build/nvgfx`), the
   NVRM power glue (`nvrmtgp` 115 W, `nvrmgps`/`nvrmnvpcf`, `nvrmphysctl`), the WindowServer shader-cache fallback, the
   A8Unorm render-target fix (plugin and translator) and the zeroed `[[color(n)]]` reads when framebuffer fetch is off.
+  Added on this branch (2.3.5-nvgfx.2): the never-written mip levels of a mipmapped 8-bit texture are filled from its
+  level-0 upload (CoreAnimation uploads only level 0 of the Dock badge text and samples it trilinear, so the digit never
+  showed), and the sampler a shader gets at a slot nothing was bound to reads level 0 only.
   Not carried over, because 2.3.x covers the same ground or the change was not yet measured against it: the dropped-draw
   fetch fix (upstream 351f5ed), the per-pipeline fetch passes for the Terminal overdraw, the event-driven present path
   and the surface dirty-mark rewire. Both of the last two come back only on evidence (see `notes/`).
