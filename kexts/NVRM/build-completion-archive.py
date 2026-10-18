@@ -9,7 +9,7 @@ if base.exists() and any(base.iterdir()):raise SystemExit('Output directory must
 base.mkdir(parents=True,exist_ok=True)
 # Each patched vendor source is copied out, patched in order, compiled with its own recorded compile command and
 # replaces its object in a copy of the vendor archive. The vendor tree itself is never modified.
-sources=[('kapi/src/nvkms-kapi.c',['610-display-completion.patch','610-setmode-reason.patch']),
+sources=[('kapi/src/nvkms-kapi.c',['610-display-completion.patch','610-setmode-reason.patch','610-viewport-scaling.patch']),
          ('src/nvkms-rm.c',['610-backlight-register-log.patch'])]
 lines=(vendor/'_out/Darwin_x86_64/compile_cmds.sh').read_text().splitlines()
 archive=base/'libnvkms.a';archive.write_bytes((vendor/'_out/Darwin_x86_64/libnvkms.a').read_bytes())

@@ -6,6 +6,8 @@ The framebuffer and accelerator allocation interface changes must be built and i
 
 `610-setmode-reason.patch` applies after it. A refused mode set logged only "commit rejected" in release builds (the reason lines are debug-only), so a WindowServer that could not set its first mode stopped with no cause on record. The patch logs one warning with the set-mode status, the display status, and each head's status.
 
+`610-viewport-scaling.patch` applies to `kapi/src/nvkms-kapi.c`. Window scaling caps (`sizeIn != sizeOut` on the primary layer) are zeroed on architectures using postcomp head scaling (such as Turing, Ada Lovelace, Blackwell), causing NVKMS to reject scaled desktop and HiDPI modes (e.g. 3840x2160 on a 2560x1440 raster or 1920x1080 HiDPI). The patch keeps the primary layer unscaled (1:1) and passes the desktop dimensions as the head viewport size (`viewPortSizeIn`), allowing the postcomp head scaler to scale the framebuffer to native raster timings without violating window scaling limits (issue #221).
+
 `610-backlight-register-log.patch` applies to `src/nvkms-rm.c`. A laptop panel driven by the GPU has no brightness control when NVKMS registers no backlight, and both inputs to that decision (the internal display mask and the brightness query) are answered by the GPU firmware with nothing on record. The patch logs the internal display status and masks, each display's brightness query status and level, and the case where none answered. No behaviour change.
 
 With the original NVIDIA 610.57.04 Darwin modeset archive and compile commands already built, run:
