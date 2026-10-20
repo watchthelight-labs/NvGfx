@@ -19,6 +19,7 @@
 #include <sys/sysctl.h>
 #include <IOKit/IOLib.h>
 #include "nvrm_physctl_abi.h"
+extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp, upstream 2.4.1
 
 extern "C" NV_STATUS rm_nvgfx_phys_control(nv_state_t *nv, NvU32 mode, NvU32 hClient, NvU32 hObject, NvU32 cmd,
                                            void *pParams, NvU32 paramsSize);
@@ -59,6 +60,10 @@ static void nvgfx_tgp_tick(thread_call_param_t, thread_call_param_t)
 
 static void nvgfx_tgp_tick_body(void)
 {
+    // <wtl> The answer nv_acpi_get_powersource gives is a cached one since 2.4.1, refreshed only at start and on
+    // wake. This runs on our own thread with no firmware lock held, so walk the registry first; otherwise the TGP
+    // mode never notices the charger going away. </wtl>
+    nv_xnu_power_refresh();
     NvU32 plugged = 0;
     NV_STATUS ps = nv_acpi_get_powersource(&plugged);
     gTgpAc = ps == NV_OK ? (plugged ? 1 : 0) : -1;
