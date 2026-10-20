@@ -493,6 +493,12 @@ public:
     IOReturn setInterruptState(void *interruptRef, UInt32 state) override { return kIOReturnSuccess; }
 };
 OSDefineMetaClassAndStructors(NVRMNVDAFramebuffer, IOFramebuffer)
+// <wtl> HDR (N-189): CoreDisplay's GetGPUVendorForFramebufferService substring-matches the IOFramebuffer class name and
+// files "NVDA" under its old NVIDIA rule, force8BPC, before any depth or HDR decision. The personality instantiates this
+// empty subclass so IOObjectCopyClass returns a name without NVDA; serviceMatching, metaCast and ioreg -c on
+// NVRMNVDAFramebuffer still match through it.
+class NVRMFramebufferHDR : public NVRMNVDAFramebuffer { OSDeclareDefaultStructors(NVRMFramebufferHDR) };
+OSDefineMetaClassAndStructors(NVRMFramebufferHDR, NVRMNVDAFramebuffer)
 struct nvrm_dpy_rec {
     NvKmsKapiDisplay handle; NvKmsKapiConnector connector; NvU32 headMask; NvBool internal;
     NvU32 edidSize; NvU8 edid[NVKMS_KAPI_EDID_BUFFER_SIZE];

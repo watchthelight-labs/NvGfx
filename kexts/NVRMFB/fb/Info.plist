@@ -23,7 +23,7 @@
 		<key>NVRMFB</key>
 		<dict>
 			<key>CFBundleIdentifier</key><string>com.nullmoth.NVRMFB</string>
-			<key>IOClass</key><string>NVRMNVDAFramebuffer</string>
+			<key>IOClass</key><string>NVRMFramebufferHDR</string>
 			<key>IOProviderClass</key><string>NVRMDisplay</string>
 			<key>IOProbeScore</key><integer>1000</integer>
 		</dict>
