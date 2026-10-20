@@ -5,18 +5,21 @@ The `nvgfx` branch is NullMoth's 2.1.0 plus the changes in the README table. Thi
 
 ## Branches and versions
 
-- `main`: upstream as pulled (tags `v2.1.0` .. `v2.3.5`).
-- `nvgfx-2.3.5` (current): our changes on top of the upstream 2.3.5 tag. Packages built from it are labelled `2.3.5-nvgfx.N`
-  (`package.sh` writes the label into `NVGFX-VERSION`). Carried over from `nvgfx`: the build harness (`build/nvgfx`), the
-  NVRM power glue (`nvrmtgp` 115 W, `nvrmgps`/`nvrmnvpcf`, `nvrmphysctl`), the WindowServer shader-cache fallback, the
-  A8Unorm render-target fix (plugin and translator) and the zeroed `[[color(n)]]` reads when framebuffer fetch is off.
-  2.3.5-nvgfx.3 adds upstream PR 273 (Liang Shuang: scaled desktop modes through the head viewport) ahead of its merge.
-  Added on this branch (2.3.5-nvgfx.2): the never-written mip levels of a mipmapped 8-bit texture are filled from its
-  level-0 upload (CoreAnimation uploads only level 0 of the Dock badge text and samples it trilinear, so the digit never
-  showed), and the sampler a shader gets at a slot nothing was bound to reads level 0 only.
-  Not carried over, because 2.3.x covers the same ground or the change was not yet measured against it: the dropped-draw
-  fetch fix (upstream 351f5ed), the per-pipeline fetch passes for the Terminal overdraw, the event-driven present path
-  and the surface dirty-mark rewire. Both of the last two come back only on evidence (see `notes/`).
+- `main`: upstream as pulled (tags `v2.1.0` .. `v2.4.1`).
+- `nvgfx-2.4.1` (current): the fork's changes on top of the upstream 2.4.1 tag, packages labelled `2.4.1-nvgfx.N`
+  (`package.sh` writes the label into `NVGFX-VERSION`, REF = NullMoth's 2.4.1 pkgroot). It carries everything from
+  `nvgfx-2.3.7`: the build harness (`build/nvgfx`), the NVRM power glue (`nvrmtgp` 115 W, `nvrmgps`/`nvrmnvpcf`,
+  `nvrmphysctl`), the WindowServer shader-cache fallback, the plugin work from the 2.3.7 branch (a function that calls
+  through a visible or intersection function table waits for its pipeline link; the per-module work of
+  newFunctionWithName is kept across libraries; the commit-time ahead pass runs on its own queue; one framebuffer-fetch
+  descriptor set per pass; refused pipeline links are remembered; CPU-written IOSurfaces upload asynchronously at
+  bind; a repeated setRenderPipelineState inside a pass is skipped; the render encoder keeps its sampler-variant
+  choice), the Dock badge mip fill, the unbound-slot sampler, and upstream PR 273 (Leaf-lsgtky: scaled desktop modes at
+  the head viewport) ahead of its merge. For the 2.4.1 base: the fork's own `_PSR` answer to `nv_acpi_get_powersource`
+  is gone (2.4.1 reads the battery service itself; `nvrmgps`/`nvrmnvpcf`/`nvrmtgp` still answer notebook and battery
+  from ACPI), the harness links upstream's `nv_xnu_power.cpp`, and the TGP tick refreshes the power source itself.
+  Every fork hunk is marked with `<wtl>` comment tags. Older branches: `nvgfx-2.3.7` (2.3.7-nvgfx.1, N-169 to N-180),
+  `nvgfx-2.3.5` (2.3.5-nvgfx.1 to .3).
 - `nvgfx`: our changes on top of the upstream 2.1.0 tag (`2.1.0-nvgfx.N`, last tested `2.1.0-nvgfx.20`). Kept for the
   trace tooling on `dock-trace` and as the rollback.
 
