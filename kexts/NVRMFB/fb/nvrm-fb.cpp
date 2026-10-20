@@ -27,6 +27,7 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/OSAtomic.h>
 #include "../nvrm_eld.h"
+#include "../nvrm_cta.h"   // <wtl> HDR: what the sink declares (colour depth, BT.2020, PQ)
 
 // Every callback this driver schedules runs one at a time. A plain thread_call that is entered again while it is still
 // running starts again on another thread, so a vblank or cursor callback stuck behind the display gate began a new
@@ -126,6 +127,7 @@ static inline void nvu_zero_wide(void *p, size_t n) { size_t q = n >> 3; __asm__
 #define FBLOG(fmt, ...) do { IOLog("NVRM-fb: " fmt "\n", ##__VA_ARGS__); kprintf("NVRM-fb: " fmt "\n", ##__VA_ARGS__); \
     { char _tb[220]; snprintf(_tb, sizeof _tb, fmt, ##__VA_ARGS__); FBTRACE(_tb); } } while (0)
 static const char kPixelFormats[] = IO32BitDirectPixels "\0";
+static const char kPixelFormats30[] = IO32BitDirectPixels "\0" kIO30BitDirectPixels "\0";   // <wtl> HDR Phase 0 depth probe
 static const IODisplayModeID kModeId = 1;
 static const unsigned kTraceMax = 900;
 
@@ -259,6 +261,15 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     // The panel's physical size in millimetres, from the EDID's base block. Reported per mode as
     // IODisplayModeInformation.imageWidth/imageHeight; see nvrmEdidPanelSizeMm().
     NvU16 fEdidMmW = 0, fEdidMmH = 0;
+    // <wtl> HDR Phase 0: what the sink declares (nvrm_cta.h), parsed with the EDID. nvrmhdr=0 keeps the old SDR-only
+    // answers, 1 (default) advertises the sink's depth/colorimetry/HDR10 and logs every CoreDisplay call that follows,
+    // 2 also offers depth index 1 (30-bit) and refuses it on request, to see whether and how CoreDisplay asks.
+    struct nvrm_cta_sink fSink = {}; bool fSinkParsed = false;
+    unsigned fHdrmCalls = 0, fHdrTimings = 0;
+    void sinkParse();
+    static unsigned hdrLevel();
+    bool hdrAdvertise() const { return hdrLevel() >= 1 && fSinkParsed; }
+    bool hdrDepthProbe() const { return hdrLevel() >= 2 && fSinkParsed && fSink.bpc >= 10; }
     bool fModeSet = false;
     unsigned fHomePure = 0;
     IODetailedTimingInformationV2 fDT[128]; unsigned fNDT = 0;
@@ -423,7 +434,7 @@ public:
     void stop(IOService *provider) override;
     void free() override;
     IOReturn enableController() override;
-    const char *getPixelFormats() override { return kPixelFormats; }
+    const char *getPixelFormats() override { return hdrDepthProbe() ? kPixelFormats30 : kPixelFormats; }
     // macOS builds its mode list from getDisplayModes BEFORE it calls setDetailedTimings, and never re-reads it: a
     // mode added only in setDetailedTimings never reached WindowServer (36 added, 0 shown). So the
     // display's native-raster modes at every refresh rate NVKMS validated are offered from the first query on.
@@ -844,6 +855,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
         nvrmEdidPanelSizeMm(fEdid, fEdidSize, &fEdidMmW, &fEdidMmH);
         FBLOG("fb%u: EDID %u B, panel %ux%u mm (imageWidth/imageHeight)", fIndex, (unsigned)fEdidSize,
               (unsigned)fEdidMmW, (unsigned)fEdidMmH);
+        sinkParse();
         // HDMI/DisplayPort audio: build the sink's ELD from its EDID and publish it with the hda-gfx pairing, the same
         // two properties AMD and Intel framebuffers expose, so the card's audio function (NMHDA + AppleHDAController)
         // has the Short Audio Descriptors a codec needs. External connectors only -- an internal eDP panel has no
@@ -1211,6 +1223,7 @@ void NVRMNVDAFramebuffer::adoptSwappedDisplay()
     fEdidSize = (NvU16)(r->edidSize > sizeof fEdid ? sizeof fEdid : r->edidSize);
     nvu_copy(fEdid, r->edid, fEdidSize);
     nvrmEdidPanelSizeMm(fEdid, fEdidSize, &fEdidMmW, &fEdidMmH);
+    sinkParse();
     if (!fInternal && fEdidSize >= 128) {
         uint8_t eld[NVRM_ELD_MAX];
         size_t eldn = nvrm_build_eld(fEdid, fEdidSize, NVRM_ELD_CONN_HDMI, eld);
@@ -2428,13 +2441,19 @@ IOReturn NVRMNVDAFramebuffer::enableController()
 IOReturn NVRMNVDAFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth)
 {
     FBLOG("fb%u setDisplayMode 0x%x depth %d (current 0x%x)", fIndex, (unsigned)mode, (int)depth, (unsigned)fCurId);
-    if (depth != 0) return kIOReturnUnsupportedMode;
+    if (depth != 0) {
+        if (depth == 1 && hdrDepthProbe()) FBLOG("fb%u setDisplayMode: CoreDisplay asked for depth 1 (30-bit) -- refused on purpose (HDR Phase 0 probe), scanout stays 8-bit", fIndex);
+        return kIOReturnUnsupportedMode;
+    }
     if (mode == kModeId) {
         if (fCurId == kModeId) return applyMode() ? kIOReturnSuccess : kIOReturnError;
         return switchMode(kModeId, fBootMode, fBootW, fBootH);
     }
     int i = dtIndex(mode);
     if (i < 0) return kIOReturnUnsupportedMode;
+    if (fDT[i].pixelEncoding | fDT[i].bitsPerColorComponent | fDT[i].colorimetry | fDT[i].dynamicRange)
+        FBLOG("fb%u setDisplayMode 0x%x colour fields: encoding 0x%x bpc 0x%x colorimetry 0x%x dynamic range 0x%x (not programmed yet, HDR Phase 0)",
+              fIndex, (unsigned)mode, fDT[i].pixelEncoding, fDT[i].bitsPerColorComponent, fDT[i].colorimetry, fDT[i].dynamicRange);
     if (mode == fCurId) return fModeSet ? kIOReturnSuccess : (applyMode() ? kIOReturnSuccess : kIOReturnError);
     struct NvKmsKapiDisplayMode m = {};
     if (!edidModeFor(&fDT[i], &m)) dtToKapi(&fDT[i], &m);
@@ -2709,10 +2728,15 @@ IOReturn NVRMNVDAFramebuffer::validateDetailedTiming(void *description, IOByteCo
             if (!fKms->validateDisplayMode(fDev, fDisplay, &m)) why = "NVKMS validateDisplayMode refused the raster (not an EDID mode)";
         }
     }
-    if (fValidateCalls <= 48 || why == nullptr)
-        FBLOG("fb%u validateDetailedTiming #%u id 0x%x %ux%u%s%ux%u pclk %llu -> %s", fIndex, fValidateCalls, (unsigned)d->detailedTimingModeID,
+    // <wtl> HDR Phase 0: a timing that asks for more than 8-bit SDR is the signal this boot is looking for; log every one.
+    const bool hdrish = (d->bitsPerColorComponent & ~(UInt16)kIOBitsPerColorComponent8) || (d->colorimetry & (kIOColorimetryBT2020 | kIOColorimetryBT2100))
+                     || (d->dynamicRange & ~(UInt16)kIODynamicRangeSDR);
+    if (hdrish) { fHdrTimings++; setProperty("nvrm-hdr-timings", (unsigned long long)fHdrTimings, 32); }
+    if (fValidateCalls <= 48 || why == nullptr || hdrish)
+        FBLOG("fb%u validateDetailedTiming #%u id 0x%x %ux%u%s%ux%u pclk %llu enc 0x%x bpc 0x%x col 0x%x dr 0x%x -> %s%s", fIndex, fValidateCalls, (unsigned)d->detailedTimingModeID,
               d->horizontalActive, d->verticalActive, d->horizontalScaled ? " desktop " : "", d->horizontalScaled, d->verticalScaled,
-              (unsigned long long)d->pixelClock, why ? why : "OK");
+              (unsigned long long)d->pixelClock, d->pixelEncoding, d->bitsPerColorComponent, d->colorimetry, d->dynamicRange, why ? why : "OK",
+              hdrish ? " (HDR-flavoured timing)" : "");
     if (why) return kIOReturnUnsupportedMode;
     fValidateOk++;
     if (!d->minPixelClock) d->minPixelClock = d->pixelClock;
@@ -2721,7 +2745,7 @@ IOReturn NVRMNVDAFramebuffer::validateDetailedTiming(void *description, IOByteCo
         IODisplayModeInformation *info = &((IOFBDisplayModeDescription *)description)->info;
         const bool scaled = d->horizontalScaled && d->verticalScaled;
         const UInt64 tot = (UInt64)(d->horizontalActive + d->horizontalBlanking) * (d->verticalActive + d->verticalBlanking);
-        info->maxDepthIndex = 0;
+        info->maxDepthIndex = hdrDepthProbe() ? 1 : 0;
         info->nominalWidth = scaled ? d->horizontalScaled : d->horizontalActive;
         info->nominalHeight = scaled ? d->verticalScaled : d->verticalActive;
         info->refreshRate = tot ? (UInt32)((d->pixelClock << 16) / tot) : 0;
@@ -2763,10 +2787,34 @@ IOReturn NVRMNVDAFramebuffer::setDetailedTimings(OSArray *array)
     FBLOG("fb%u setDetailedTimings: %u timing(s) installed (%u from macOS, %u refresh rates from NVKMS; %u malformed, %u offered), current 0x%x, EDID matches so far %u",
           fIndex, n, fromMac, n - fromMac, bad, array->getCount(), (unsigned)fCurId, fEdidHits);
     for (unsigned i = 0; i < n && i < 24; i++)
-        FBLOG("  dt 0x%x raster %ux%u desktop %ux%u pclk %llu", fDT[i].detailedTimingModeID, fDT[i].horizontalActive, fDT[i].verticalActive,
-              fDT[i].horizontalScaled, fDT[i].verticalScaled, (unsigned long long)fDT[i].pixelClock);
+        FBLOG("  dt 0x%x raster %ux%u desktop %ux%u pclk %llu enc 0x%x bpc 0x%x col 0x%x dr 0x%x", fDT[i].detailedTimingModeID, fDT[i].horizontalActive, fDT[i].verticalActive,
+              fDT[i].horizontalScaled, fDT[i].verticalScaled, (unsigned long long)fDT[i].pixelClock,
+              fDT[i].pixelEncoding, fDT[i].bitsPerColorComponent, fDT[i].colorimetry, fDT[i].dynamicRange);
     setProperty("NVRMDetailedTimings", (unsigned long long)n, 32);
     return kIOReturnSuccess;
+}
+unsigned NVRMNVDAFramebuffer::hdrLevel()
+{
+    static int lvl = -1;
+    if (lvl < 0) { uint32_t v = 1; PE_parse_boot_argn("nvrmhdr", &v, sizeof v); lvl = (int)(v > 2 ? 2 : v); }
+    return (unsigned)lvl;
+}
+void NVRMNVDAFramebuffer::sinkParse()
+{
+    nvrm_cta_parse(fEdid, fEdidSize, &fSink);
+    fSinkParsed = fEdidSize >= 128;
+    setProperty("nvrm-sink-bpc", (unsigned long long)fSink.bpc, 8);
+    setProperty("nvrm-sink-colorimetry", (unsigned long long)(fSink.has_colorimetry ? (((unsigned)fSink.colorimetry2 << 8) | fSink.colorimetry) : 0), 16);
+    setProperty("nvrm-sink-hdr", (unsigned long long)(fSink.has_hdr ? fSink.eotf : 0), 8);
+    setProperty("nvrm-sink-hdr-lum", (unsigned long long)(((unsigned)fSink.max_lum << 16) | ((unsigned)fSink.max_fal << 8) | fSink.min_lum), 32);
+    setProperty("nvrm-hdr-level", (unsigned long long)hdrLevel(), 8);
+    FBLOG("fb%u sink: %s, %u bpc, colorimetry block %s 0x%02x/0x%02x (BT.2020 %s), HDR block %s eotf 0x%02x (PQ+type1 %s) lum codes %u/%u/%u",
+          fIndex, fSink.digital ? "digital" : "not digital", fSink.bpc, fSink.has_colorimetry ? "yes" : "no", fSink.colorimetry, fSink.colorimetry2,
+          nvrm_cta_sink_bt2020(&fSink) ? "yes" : "no", fSink.has_hdr ? "yes" : "no", fSink.eotf, nvrm_cta_sink_pq(&fSink) ? "yes" : "no",
+          fSink.max_lum, fSink.max_fal, fSink.min_lum);
+    FBLOG("fb%u sink: nvrmhdr=%u -> %s", fIndex, hdrLevel(),
+          hdrLevel() == 0 ? "SDR-only answers (as before)" : hdrDepthProbe() ? "advertise the sink's depth/BT.2020/HDR10 and offer depth 1 (refused on request)"
+          : hdrAdvertise() ? "advertise the sink's depth/BT.2020/HDR10, log what CoreDisplay does" : "no EDID, nothing to advertise");
 }
 void NVRMNVDAFramebuffer::publishTimingCaps()
 {
@@ -2796,9 +2844,16 @@ void NVRMNVDAFramebuffer::publishTimingCaps()
     r.maxNumLinks = 1; r.minLink0PixelClock = 25000; r.maxLink0PixelClock = 1200000;
     r.supportedPixelEncoding = kIORangePixelEncodingRGB444; r.supportedBitsPerColorComponent = kIORangeBitsPerColorComponent8;
     r.supportedColorimetryModes = kIORangeColorimetryNativeRGB | kIORangeColorimetrysRGB; r.supportedDynamicRangeModes = kIORangeDynamicRangeSDR;
+    // <wtl> HDR Phase 0: advertise what the sink's EDID declares; the scanout itself is still 8-bit SDR.
+    if (hdrAdvertise()) {
+        if (fSink.bpc >= 10) r.supportedBitsPerColorComponent |= kIORangeBitsPerColorComponent10;
+        if (nvrm_cta_sink_bt2020(&fSink)) r.supportedColorimetryModes |= kIORangeColorimetryBT2020 | kIORangeColorimetryBT2100;
+        if (nvrm_cta_sink_pq(&fSink)) r.supportedDynamicRangeModes |= kIORangeDynamicRangeHDR10;
+    }
     OSData *g = OSData::withBytes(&r, sizeof r);
     if (g) { setProperty(kIOFBTimingRangeKey, g); g->release(); }
-    FBLOG("fbmodes: published IOFBScalerInfo (up+down, max %ux%u) + IOFBTimingRange (25 MHz..1.2 GHz, 23..500 Hz)", fScalerMaxW, fScalerMaxH);
+    FBLOG("fbmodes: published IOFBScalerInfo (up+down, max %ux%u) + IOFBTimingRange (25 MHz..1.2 GHz, 23..500 Hz, bpc 0x%x colorimetry 0x%x dynamic range 0x%x)",
+          fScalerMaxW, fScalerMaxH, r.supportedBitsPerColorComponent, r.supportedColorimetryModes, r.supportedDynamicRangeModes);
 }
 IOReturn NVRMNVDAFramebuffer::getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info)
 {
@@ -2812,14 +2867,14 @@ IOReturn NVRMNVDAFramebuffer::getInformationForDisplayMode(IODisplayModeID mode,
         info->nominalWidth = scaled ? d.horizontalScaled : d.horizontalActive;
         info->nominalHeight = scaled ? d.verticalScaled : d.verticalActive;
         info->refreshRate = tot ? (UInt32)((d.pixelClock << 16) / tot) : (60u << 16);
-        info->maxDepthIndex = 0;
+        info->maxDepthIndex = hdrDepthProbe() ? 1 : 0;
         info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | (scaled ? kDisplayModeNotPresetFlag : 0);
         if (!scaled && d.horizontalActive == fBootW && d.verticalActive == fBootH) info->flags |= kDisplayModeNativeFlag;
         info->imageWidth = fEdidMmW; info->imageHeight = fEdidMmH;
         return kIOReturnSuccess;
     }
     nvu_zero(info, sizeof *info);
-    info->nominalWidth = fBootW ? fBootW : fW; info->nominalHeight = fBootH ? fBootH : fH; info->maxDepthIndex = 0;
+    info->nominalWidth = fBootW ? fBootW : fW; info->nominalHeight = fBootH ? fBootH : fH; info->maxDepthIndex = hdrDepthProbe() ? 1 : 0;
     const NvU32 rr = fBootW ? fBootMode.timings.refreshRate : fMode.timings.refreshRate;
     info->refreshRate = rr ? (UInt32)(((UInt64)rr << 16) / 1000) : (60u << 16);
     info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
@@ -2862,7 +2917,8 @@ IOReturn NVRMNVDAFramebuffer::getTimingInfoForDisplayMode(IODisplayModeID mode, 
 }
 IOReturn NVRMNVDAFramebuffer::getPixelInformation(IODisplayModeID mode, IOIndex depth, IOPixelAperture aperture, IOPixelInformation *pi)
 {
-    if (depth != 0 || aperture != kIOFBSystemAperture || !pi) return kIOReturnUnsupportedMode;
+    const bool deep = depth == 1 && hdrDepthProbe();   // <wtl> HDR Phase 0: describe 30-bit, never scan it out yet
+    if ((depth != 0 && !deep) || aperture != kIOFBSystemAperture || !pi) return kIOReturnUnsupportedMode;
     NvU32 pw = fBootW ? fBootW : fW, ph = fBootH ? fBootH : fH, pp = fBootPitch ? fBootPitch : fPitch;
     if (mode != kModeId) {
         int i = dtIndex(mode); if (i < 0) return kIOReturnUnsupportedMode;
@@ -2872,11 +2928,16 @@ IOReturn NVRMNVDAFramebuffer::getPixelInformation(IODisplayModeID mode, IOIndex 
     }
     nvu_zero(pi, sizeof *pi);
     pi->activeWidth = pw; pi->activeHeight = ph; pi->bytesPerRow = pp; pi->bytesPerPlane = 0;
-    pi->bitsPerPixel = 32; pi->pixelType = kIORGBDirectPixels; pi->componentCount = 3; pi->bitsPerComponent = 8;
-    pi->componentMasks[0] = 0x00ff0000; pi->componentMasks[1] = 0x0000ff00; pi->componentMasks[2] = 0x000000ff;
-    strlcpy(pi->pixelFormat, IO32BitDirectPixels, sizeof pi->pixelFormat);
+    pi->bitsPerPixel = 32; pi->pixelType = kIORGBDirectPixels; pi->componentCount = 3; pi->bitsPerComponent = deep ? 10 : 8;
+    if (deep) {
+        pi->componentMasks[0] = 0x3ff00000; pi->componentMasks[1] = 0x000ffc00; pi->componentMasks[2] = 0x000003ff;
+        strlcpy(pi->pixelFormat, kIO30BitDirectPixels, sizeof pi->pixelFormat);
+    } else {
+        pi->componentMasks[0] = 0x00ff0000; pi->componentMasks[1] = 0x0000ff00; pi->componentMasks[2] = 0x000000ff;
+        strlcpy(pi->pixelFormat, IO32BitDirectPixels, sizeof pi->pixelFormat);
+    }
     pi->flags = 0;
-    FBLOG("getPixelInformation 0x%x ap %d -> %ux%u bytesPerRow %u", (unsigned)mode, (int)aperture, pw, ph, pp);
+    FBLOG("getPixelInformation 0x%x depth %d ap %d -> %ux%u bytesPerRow %u %s", (unsigned)mode, (int)depth, (int)aperture, pw, ph, pp, deep ? "30-bit" : "32-bit");
     return kIOReturnSuccess;
 }
 IOService *NVRMNVDAFramebuffer::pciNub()
@@ -3514,9 +3575,10 @@ IOReturn NVRMNVDAFramebuffer::getAttributeForConnection(IOIndex connectIndex, IO
     case kConnectionEnable: if (value) *value = 1; FBLOG("getAFC '%s' -> enable 1", _s); return kIOReturnSuccess;
     case kConnectionFlags:  if (value) *value = fInternal ? kIOConnectionBuiltIn : 0; return kIOReturnSuccess;
     case kConnectionColorModesSupported:       if (value) *value = 0x00000001; return kIOReturnSuccess;
-    case kConnectionColorDepthsSupported:      if (value) *value = 0x00000002; return kIOReturnSuccess;
-    case kConnectionControllerColorDepth:      if (value) *value = 0x00000002; return kIOReturnSuccess;
-    case kConnectionControllerDepthsSupported: if (value) *value = 0x00000002; return kIOReturnSuccess;
+    // <wtl> HDR Phase 0: the depths the sink can take (8, plus 10 when its EDID says so); the controller still runs 8.
+    case kConnectionColorDepthsSupported:      if (value) *value = (hdrAdvertise() && fSink.bpc >= 10) ? (kIODisplayRGBColorComponentBits8 | kIODisplayRGBColorComponentBits10) : kIODisplayRGBColorComponentBits8; return kIOReturnSuccess;
+    case kConnectionControllerColorDepth:      if (value) *value = kIODisplayRGBColorComponentBits8; return kIOReturnSuccess;
+    case kConnectionControllerDepthsSupported: if (value) *value = (hdrAdvertise() && fSink.bpc >= 10) ? (kIODisplayRGBColorComponentBits8 | kIODisplayRGBColorComponentBits10) : kIODisplayRGBColorComponentBits8; return kIOReturnSuccess;
     case kConnectionColorMode:                 if (value) *value = 0x00000001; return kIOReturnSuccess;
     case kConnectionCheckEnable:               if (value) *value = 1; return kIOReturnSuccess;
     case kConnectionDisplayFlags:              if (value) *value = 0; return kIOReturnSuccess;
@@ -3627,6 +3689,11 @@ IOReturn NVRMNVDAFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
         IOReturn r = super::setAttribute(attribute, value);
         return (r == kIOReturnUnsupported) ? kIOReturnSuccess : r;
     }
+    if (attribute == kIOFBHDRMetaDataAttribute) {   // <wtl> HDR Phase 0: record that CoreDisplay sends mastering metadata, and what the raw value is
+        fHdrmCalls++; setProperty("nvrm-hdrm-calls", (unsigned long long)fHdrmCalls, 32);
+        FBLOG("setAttribute 'hdrm' (HDR mastering metadata) #%u raw 0x%lx -> accepted, not applied", fHdrmCalls, (unsigned long)value);
+        return kIOReturnSuccess;
+    }
     IOReturn r = super::setAttribute(attribute, value);
     FBLOG("setAttribute '%s' value %lu -> 0x%x", c, (unsigned long)value, r);
     return r;
@@ -3716,6 +3783,7 @@ IOReturn NVRMNVDAFramebuffer::setAttributeForConnection(IOIndex connectIndex, IO
     case kConnectionColorDepthsSupported:
     case kConnectionControllerColorDepth:
     case kConnectionControllerDepthsSupported:
+    case kConnectionControllerDitherControl:   // <wtl> HDR Phase 0: '\0gdc', logged, not applied yet
     case kConnectionColorMode:
     case kConnectionDisplayFlags:
     case kConnectionFlags:
