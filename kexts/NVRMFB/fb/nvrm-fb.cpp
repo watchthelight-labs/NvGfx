@@ -849,6 +849,13 @@ bool NVRMNVDAFramebuffer::kapiInit()
     {
         struct nvrm_dpy_rec *r = &gDpy[fIndex];
         fDisplay = r->handle; fConnector = r->connector; fInternal = r->internal;
+        // <wtl> HDR Phase 0 (N-188): nvfbexternal=1 reports the laptop panel as an external display for one boot, to
+        // test whether CoreDisplay's HDR switch is gated on the built-in path. Costs AppleBacklightDisplay (brightness keys).
+        { uint32_t ext = 0;
+          if (fInternal && PE_parse_boot_argn("nvfbexternal", &ext, sizeof ext) && ext) {
+              fInternal = false;
+              FBLOG("fb%u: display 0x%x is internal but nvfbexternal=1 -- reporting it as external (no built-in flag, no backlight)", fIndex, fDisplay);
+          } }
         if (fInternal) FBLOG("fb%u: display 0x%x is internal -- reporting kIOConnectionBuiltIn", fIndex, fDisplay);
         fEdidSize = (NvU16)(r->edidSize > sizeof fEdid ? sizeof fEdid : r->edidSize);
         nvu_copy(fEdid, r->edid, fEdidSize);
