@@ -1,4 +1,5 @@
 # NvGfx
+<!-- <wtl> fork: nvgfx | author: watchthelight </wtl> -->
 
 > **Heads up:** a good portion of the changes in this fork are AI generated. I do understand
 > how they work, and I'm happy to explain any of it. If something looks wrong or you have a

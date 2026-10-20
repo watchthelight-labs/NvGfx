@@ -19,7 +19,7 @@
 #include <sys/uio.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
-#include <i386/machine_routines.h>
+#include <i386/machine_routines.h>   // <wtl>
 #include <sys/proc.h>
 #include <sys/kauth.h>
 #include <libkern/crypto/sha1.h>
@@ -1420,10 +1420,12 @@ void  NV_API_CALL nv_acpi_methods_uninit(void) { TRC; }
 // backlight tables from the firmware: the NBCI _DSM functions GETOBJBYTYPE (0x10) and GETBACKLIGHT
 // (0x14), plus the display ACPI ids from _DOD. Without them NV0073_CTRL_CMD_SPECIFIC_GET_BACKLIGHT_BRIGHTNESS
 // fails with NV_ERR_NOT_SUPPORTED and NVKMS never calls nvkms_register_backlight().
+// <wtl>
 // Both are evaluated on the GPU's ACPI node, as kernel-open/nvidia/nv-acpi.c does. Only NBCI is answered here:
 // RM asks each _DSM GUID for its functions separately (_acpiDsmSupportedFuncCacheInit), so every other
 // GUID (NVHG, MXM, NVOP, JT...) stays "not supported", as before. GPS and NVPCF have their own opt-in
 // boot-args (nvrmgps, nvrmnvpcf; see nv_acpi_dsm_method).
+// </wtl>
 extern "C" {
 #include "nbci.h"
 }
@@ -1520,6 +1522,7 @@ NV_STATUS NV_API_CALL nv_acpi_dod_method(nv_state_t *nv, NvU32 *pOutData, NvU32 
     return st;
 }
 
+// <wtl>
 // Platform power (notes/power.md). Two more opt-in _DSM families, each behind its own boot-arg and independent of
 // nvrmacpibl (which keeps gating NBCI and _DOD exactly as before):
 //   nvrmgps=1    GPS (the Platform Request Handler's _DSM, GPS_DSM_GUID) on the GPU's own ACPI node, any subfunction,
@@ -1593,12 +1596,14 @@ static IOACPIPlatformDevice *nv_xnu_adapter(void) { return nv_xnu_acpi_cached_ge
 // AML can sleep (EC mutexes: this firmware's _PSR and _BIX wait up to 40 s on LFCM). Linux refuses _DSM when
 // !NV_MAY_SLEEP(); do the same for the new calls.
 static bool nv_xnu_acpi_may_sleep(void) { return ml_get_interrupts_enabled() && !os_is_isr(); }
+// </wtl>
 
 NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU32 acpiDsmRev, NvBool acpiNvpcfDsmFunction,
                                          NvU32 acpiDsmSubFunction, void *pInParams, NvU16 inParamSize, NvU32 *outStatus,
                                          void *pOutData, NvU16 *pSize)
 {
     TRC;
+    // <wtl>
     const bool bl = nv_xnu_acpi_backlight_on(), gps = nv_xnu_gps_on(), pcf = nv_xnu_nvpcf_on();
     if (!bl && !gps && !pcf) return NV_ERR_NOT_SUPPORTED;
     if (!pAcpiDsmGuid || !pInParams || inParamSize > NV_XNU_MAX_ACPI_DSM_PARAM_SIZE || !pOutData || !pSize)
@@ -1619,6 +1624,7 @@ NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU
     }
     if (kind != K_NBCI && !nv_xnu_acpi_may_sleep()) return NV_ERR_NOT_SUPPORTED;
     IOACPIPlatformDevice *acpi = kind == K_NVPCF ? nv_xnu_npcf() : nv_xnu_gpu_acpi(nv);
+    // </wtl>
     if (!acpi) return NV_ERR_NOT_SUPPORTED;
 
     OSObject *args[4] = { OSData::withBytes(pAcpiDsmGuid, 16), OSNumber::withNumber(acpiDsmRev, 32),
@@ -1634,6 +1640,7 @@ NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU
         *pSize = (NvU16)len;
     }
     OSSafeReleaseNULL(o);
+    // <wtl>
     if (kind == K_NBCI) {
         // One line per subfunction, every GETBACKLIGHT call. A flat cap of 8 lines was spent by the support query and
         // the GETOBJBYTYPE fetches at GPU start, so a laptop log never showed whether the backlight table was asked for.
@@ -1653,9 +1660,11 @@ NV_STATUS NV_API_CALL nv_acpi_dsm_method(nv_state_t *nv, NvU8 *pAcpiDsmGuid, NvU
             kprintf("NVRM-xnu: %s _DSM 0x%x rev 0x%x in %u B -> 0x%x (%u B, ioret 0x%x)\n", kind == K_GPS ? "GPS" : "NVPCF",
                     acpiDsmSubFunction, acpiDsmRev, (unsigned)inParamSize, st, (unsigned)*pSize, r);
     }
+    // </wtl>
     return st;
 }
 
+// <wtl>
 // RM's view of the platform (osapi.h rm_is_system_notebook = nv_is_chassis_notebook || nv_acpi_is_battery_present;
 // it only feeds SYS static config bIsNotebook and the RTD3 default in rm_init_dynamic_power_management, which this
 // port never calls). Linux reads the SMBIOS chassis type; here, with nvrmgps or nvrmnvpcf set, a notebook is a
@@ -1696,6 +1705,7 @@ extern "C" NvBool nv_xnu_power_battery_present(void)
 // nv_acpi_get_powersource: upstream 2.4.1 answers it in nv_xnu_stubs.cpp from what nv_xnu_power.cpp read off the
 // battery service at its own safe points. The firmware asks with its locks held, so the fork's _PSR evaluation here
 // is gone; nvrmtgp (nvrm_power.cpp) still polls _PSR, from its own thread.
+// </wtl>
 void  NV_API_CALL nv_get_screen_info(nv_state_t *nv, NvU64 *pa, NvU32 *w, NvU32 *h, NvU32 *depth, NvU32 *pitch, NvU64 *size)
 {
     TRC;

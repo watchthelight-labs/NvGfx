@@ -3,6 +3,7 @@
 # but with repo-relative sources. Needs only the Command Line Tools and Khronos Vulkan-Headers.
 #   NVGFX_DEPS (default ~/src/deps) holds Vulkan-Headers; output goes to NVGFX_OUT (default ~/src/NvGfx-build/plugin).
 #   RELEASE=1 matches the shipped release build (-DNVMTL_RELEASE=1, diagnostics compiled out).
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 set -euo pipefail
 R=$(cd "$(dirname "$0")/../.." && pwd)
 DEPS=${NVGFX_DEPS:-$HOME/src/deps}

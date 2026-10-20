@@ -112,7 +112,7 @@ extern id gNVMTLMainDevice;
 @interface NVMTLCommandBuffer : NSObject <MTLCommandBuffer> {
   NSError *_cbError;
   NSMutableDictionary *_userDictionary;
-  @public nvk_cmdbuf _c; NVMTLCommandQueue *_queue; BOOL _committed, _commitMarking, _partsRetiring; BOOL _capacityHeld; MTLCommandBufferStatus _cbstatus;
+  @public nvk_cmdbuf _c; NVMTLCommandQueue *_queue; BOOL _committed, _commitMarking, _partsRetiring; BOOL _capacityHeld; MTLCommandBufferStatus _cbstatus;   // <wtl>
   NVMTLTexture *_present;
   NSMutableArray *_presentations;
   NSMutableArray *_handlers;
@@ -199,7 +199,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
   NSMutableDictionary *_vertexSamplers, *_fragmentSamplers;
   NSData *_pixelSamplerKey; // sampler specialization depends on values, not the draw or pipeline
   NSMutableArray *_pixelSamplerKeys; // at most eight recent value snapshots, owned by this encoder
-  NVMTLRenderPipelineState *_svFor; NSData *_svKey; id _svSel; // the last sampler-variant choice of this encoder
+  NVMTLRenderPipelineState *_svFor; NSData *_svKey; id _svSel; // <wtl> the last sampler-variant choice of this encoder
   // the buffer and offset bound at each vertex/fragment index, read by embedded argument binding; plain arrays because
   // Apple's GL rebinds buffers for every draw, and a dictionary of (buffer, offset) arrays allocated on each one
   NVMTLBuffer *_vbufAt[NVMTL_NBUFAT], *_fbufAt[NVMTL_NBUFAT]; NSUInteger _vbufOff[NVMTL_NBUFAT], _fbufOff[NVMTL_NBUFAT];

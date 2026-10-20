@@ -31,11 +31,13 @@ extern "C" {
 #include "nvrm_gpuva_abi.h"
 #define NVRM_SS_KERNEL_ABI 1
 #include "nvrm_surfshare_abi.h"
+// <wtl>
 #include "nvrm_physctl_abi.h"
 extern "C" void nvgfx_power_start(nv_state_t *nv);
 extern "C" void nvgfx_power_stop(void);
 extern "C" NV_STATUS rm_nvgfx_phys_control(nv_state_t *nv, NvU32 mode, NvU32 hClient, NvU32 hObject, NvU32 cmd,
                                            void *pParams, NvU32 paramsSize);
+// </wtl>
 extern "C" int nvrm_surfshare_rm(struct NVRMSurfShareRm *);
 extern "C" int nvrm_surfshare_pageoff(struct NVRMSurfPageoff *, void *nv);
 extern "C" task_t current_task(void);
@@ -1401,7 +1403,7 @@ IOReturn NVRM::go(uint32_t pass)
         }
         publishGpuProfile();
         if (nvkms_xnu_load()) nvrm_display_publish(this, fNv.gpu_id);
-        nvgfx_power_start(nv);   // boot-arg nvrmtgp=1: TGP mode on while on AC (nvrm_power.cpp)
+        nvgfx_power_start(nv);   // <wtl> boot-arg nvrmtgp=1: TGP mode on while on AC (nvrm_power.cpp)
     }
     return kIOReturnSuccess;
 }
@@ -1424,7 +1426,7 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
 
 void NVRM::stop(IOService *provider)
 {
-    nvgfx_power_stop();
+    nvgfx_power_stop();   // <wtl>
     if (fPmJoined) { PMstop(); fPmJoined = false; }
     if (fAdapter) { rm_shutdown_adapter(NULL, &fNv); fAdapter = false; }
     if (fIntSrc) { fIntSrc->disable(); if (fWorkLoop) fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL; }
@@ -2003,6 +2005,7 @@ IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
         if (sym) { accel->callPlatformFunction(sym, false, ss, (void *)current_task(), (void *)(uintptr_t)cmd, NULL); sym->release(); }
         return kIOReturnSuccess;
     }
+    // <wtl>
     case NVRM_ESC_PHYS_CTRL: {
         // Root-only debug hook (notes/power.md): one RM control with kernel privilege, on the GPU's internal client
         // through the physical RM API (GSP) or as an internal call on a CPU-RM object. Needs boot-arg nvrmphysctl=1.
@@ -2019,6 +2022,7 @@ IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
                 proc_selfpid(), pc->status);
         return kIOReturnSuccess;
     }
+    // </wtl>
     default: {
         NV_STATUS st = rm_ioctl(NULL, nv, &fNvfp, cmd, data, size);
         if (st != NV_OK) kprintf("NVRM-xnu: esc 0x%x size %u -> RM status 0x%x\n", cmd, size, st);

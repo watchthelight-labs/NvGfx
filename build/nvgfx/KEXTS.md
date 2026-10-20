@@ -1,4 +1,5 @@
 # NVRMFB, NVAccel and NMXAccel: reproducible builds
+<!-- <wtl> fork: nvgfx | author: watchthelight </wtl> -->
 
 Phase 3 of the NvGfx plan: build the framebuffer and accelerator kexts from this tree so they can replace the shipped
 2.1.0 binaries next to the shipped NVRM.kext, then change them (165 Hz present path in `kexts/NVRMFB/fb/nvrm-fb.cpp`

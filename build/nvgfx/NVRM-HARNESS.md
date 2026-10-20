@@ -1,4 +1,5 @@
 # NVRM.kext build harness
+<!-- <wtl> fork: nvgfx | author: watchthelight </wtl> -->
 
 NullMoth publishes the XNU glue for `NVRM.kext` (`kexts/NVRM`) but not the script that builds NVIDIA's resource
 manager (RM) for Darwin: `kexts/NVRM/rmcc.py` refers to a `build-nvrm.sh` that was never released, and

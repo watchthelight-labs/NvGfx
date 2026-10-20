@@ -3,6 +3,7 @@
 # Static comparison of a rebuilt NVRM.kext binary with the shipped one: file size, load commands, section sizes,
 # undefined (imported KPI) symbols, exported symbols, all symbol names, and per-function code size. Uses only nm and
 # otool, never loads or runs anything.
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 import collections, subprocess, sys
 
 def run(*a):

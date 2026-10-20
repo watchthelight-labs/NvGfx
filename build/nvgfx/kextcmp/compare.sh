@@ -1,5 +1,6 @@
 #!/bin/bash
 # compare.sh: SHIPPED=<2.1.0 pkgroot> [OUTROOT=<build out>] compare.sh. Compares every built kext with the shipped 2.1.0 one (symbols, sections, data symbol sizes, vtables, plist)
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 K=${OUTROOT:-$HOME/src/NvGfx-build/kexts}; T=$(cd "$(dirname "$0")" && pwd); P=${SHIPPED:?set SHIPPED to the 2.1.0 pkgroot}
 cmp1() {  # name builtdir shippedkext
   local n=$1 d=$2 rk=$3; local N=$d/$n.kext/Contents/MacOS/$n R=$rk/Contents/MacOS/$n

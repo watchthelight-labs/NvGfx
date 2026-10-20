@@ -3,6 +3,7 @@
 # used for <template.c> in <tree> (src/nvidia or src/nvidia-modeset), swapping only source, object and depfile.
 # Generalises kexts/NVRM/rmcc.py (which is fixed to src/nvidia + osapi.c) so modeset-internal glue such as
 # nvrm_kapi_fields.c sees NVKMS's structs exactly as libnvkms.a did.
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 import os, shlex, subprocess, sys
 tree, tmpl, src, out = sys.argv[1], sys.argv[2], os.path.abspath(sys.argv[3]), os.path.abspath(sys.argv[4])
 lines = [l for l in open(os.path.join(tree, "_out/Darwin_x86_64/compile_cmds.sh")) if f" -c {tmpl} " in l]

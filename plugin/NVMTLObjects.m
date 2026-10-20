@@ -1041,6 +1041,7 @@ static int nvmtl_noseed(void) { static uint64_t next; static int on; uint64_t no
         if (!on && was) nvlog("G17 experiment off: surface-out bumps the seed again"); }
     return on; }
 static void nvmtl_census(const char *what, uint32_t w, uint32_t h, int surf) {
+    // <wtl>
     static struct { const char *what; uint32_t w, h; int surf; } seen[48]; static int n; static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
     if (__atomic_load_n(&n, __ATOMIC_RELAXED) == 48) return;   // full: every later pass skips the lock
     os_unfair_lock_lock(&lk);
@@ -1048,6 +1049,7 @@ static void nvmtl_census(const char *what, uint32_t w, uint32_t h, int surf) {
     if (n == 48) { os_unfair_lock_unlock(&lk); return; }
     seen[n].what = what; seen[n].w = w; seen[n].h = h; seen[n].surf = surf; __atomic_store_n(&n, n + 1, __ATOMIC_RELAXED);
     os_unfair_lock_unlock(&lk);
+    // </wtl>
     nvlog("G14 census: %s %ux%u iosurface=%d (first time in this process)", what, w, h, surf);
 }
 static void nvmtl_frame_dump(const char *tag, const void *base, size_t row, uint32_t w, uint32_t h);
@@ -1606,10 +1608,12 @@ id gNVMTLMainDevice = nil;
 
 extern NSData *nvmtl_translate_samplers(NVMTLFunction *, NSDictionary *, uint32_t, NSString **);
 extern NSData *nvmtl_translate_variant(NVMTLFunction *, NSDictionary *, NSDictionary *, NSString **);
+// <wtl>
 // facts about a module's text that newFunctionWithName asks for on every call; kept on the text (NVMTLLibraryLoad.m)
 enum { NVMTL_AIRF_KNOWN = 1, NVMTL_AIRF_DYLD_TABLE = 2, NVMTL_AIRF_ISECT_TABLE = 4 };
 uint32_t nvmtl_air_text_flags(NSString *ll);
 static char gNVMTLEntrySpvAssoc;
+// </wtl>
 @interface NVMTLCIBinding : NSObject { @public NSString *_name; NVMTLType *_t; } @end
 @implementation NVMTLCIBinding
 - (NSString *)name { return _name ?: @""; }
@@ -2319,17 +2323,19 @@ extern NSData *nvmtl_compile_library_entry(NSData *, NSString *, NSString *, NSS
 
     NSData *air = _fns[name];
     NSString *ll = _airs[name], *stage = _stages[name];
+    // <wtl>
     // The library index hands every library made from the same file the same bitcode objects, so the entry's SPIR-V is
     // kept on its bitcode: a library made again (VideoToolbox makes one per transfer) neither hashes nor reads it again.
     NSData *known = air ? objc_getAssociatedObject(air, &gNVMTLEntrySpvAssoc) : nil;
     NSString *why = nil;
     NSData *spv = known ?: nvmtl_compile_library_entry(air, ll, stage, name, &why);
+    // </wtl>
     if (!spv) {
         if (error) *error = [NSError errorWithDomain:@"NVMTL" code:3
                                            userInfo:@{NSLocalizedDescriptionKey:why ?: @"entry translation failed"}];
         return nil;
     }
-    if (!known && air) objc_setAssociatedObject(air, &gNVMTLEntrySpvAssoc, spv, OBJC_ASSOCIATION_RETAIN);
+    if (!known && air) objc_setAssociatedObject(air, &gNVMTLEntrySpvAssoc, spv, OBJC_ASSOCIATION_RETAIN);   // <wtl>
 
     @synchronized(self) {
         NSData *won = _compiledFns[name];
@@ -2347,13 +2353,13 @@ extern NSData *nvmtl_compile_library_entry(NSData *, NSString *, NSString *, NSS
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fname = name; f->_stage = _stages[name];
         f->_air = _airs[name]; f->_lib = self; return f;
     }
-    const uint32_t af = spv ? nvmtl_air_text_flags(_airs[name]) : 0;
-    if (spv && (af & NVMTL_AIRF_DYLD_TABLE)) {
+    const uint32_t af = spv ? nvmtl_air_text_flags(_airs[name]) : 0;   // <wtl>
+    if (spv && (af & NVMTL_AIRF_DYLD_TABLE)) {   // <wtl>
         nvlog("library: \"%s\" was compiled against a dynamic library - DEFERRED to pipeline creation", name.UTF8String);
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fname = name; f->_stage = (_stages[name] ?: @"");
         f->_air = _airs[name]; f->_lib = self; f->_needsLink = YES; return f;
     }
-    if (spv && (af & NVMTL_AIRF_ISECT_TABLE)) {
+    if (spv && (af & NVMTL_AIRF_ISECT_TABLE)) {   // <wtl>
         nvlog("library: \"%s\" takes an intersection function table - DEFERRED to pipeline creation", name.UTF8String);
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fname = name; f->_stage = (_stages[name] ?: @"");
         f->_air = _airs[name]; f->_lib = self; f->_needsLink = YES; return f;
@@ -2736,14 +2742,16 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
             }
         }
         NSData *key=_pixelSamplerKey;
+        // <wtl>
         // same pipeline, same sampler values as this encoder's last draw: its choice stands (no lock, no lookup; ANGLE
         // binds every draw)
         if (_svSel && _svFor==_ps && _svKey==key) return _svSel==[NSNull null] ? nil : _svSel;
         _svFor=_ps; _svKey=key; _svSel=nil;
+        // </wtl>
         @synchronized(_ps) {
             if(!_ps->_samplerVariants) _ps->_samplerVariants=[NSMutableDictionary new];
             id cached=_ps->_samplerVariants[key];
-            if(cached==[NSNull null]) { _svSel=cached; return nil; }
+            if(cached==[NSNull null]) { _svSel=cached; return nil; }   // <wtl>
             selected=cached;
             if(!selected) {
                 // Reusing the key across pipelines still performs each pipeline's own variant lookup.
@@ -2762,13 +2770,13 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
                     if(!selected)why=error.description;
                     else nvmtl_sampvar_put(gk,selected,vf,ff);
                 }
-                if(!selected){nvlog("pixel sampler specialization REFUSED %s: %s",_ps->_fname.UTF8String,why.UTF8String);_ps->_samplerVariants[key]=[NSNull null];_svSel=[NSNull null];return nil;}
+                if(!selected){nvlog("pixel sampler specialization REFUSED %s: %s",_ps->_fname.UTF8String,why.UTF8String);_ps->_samplerVariants[key]=[NSNull null];_svSel=[NSNull null];return nil;}   // <wtl>
                 _ps->_samplerVariants[key]=selected;
                 nvlog("pixel sampler variant built: %s / %s",_ps->_vname.UTF8String,_ps->_fname.UTF8String);
             }
         }
     }
-    _svSel=selected;
+    _svSel=selected;   // <wtl>
     return selected;
 }
 - (BOOL)nvmtlBindSamplerPipeline {
@@ -2940,10 +2948,12 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)ps {
     // NVMTL_DUMP_PSO=<text>: the first encoder that sets a pipeline whose label contains it has the fragment buffers bound
     // at its end dumped, as NVMTL_DUMP_GROUP does, for apps that label pipelines but push no debug groups (diagnostic)
+    // <wtl>
     // The same pipeline again inside a begun pass (Apple's GL renderer sets it before every draw) changes nothing.
     if (ps && (NVMTLRenderPipelineState *)ps == _ps && _begun && !(_cb->_c.pt_open && _cb->_c.pt_pool)) return;
+    // </wtl>
     { static const char *want; static int once; static _Atomic int armed; if (!once) { once = 1; want = getenv("NVMTL_DUMP_PSO"); }
-      NSString *lbl = want ? ps.label : nil;
+      NSString *lbl = want ? ps.label : nil;   // <wtl>
       if (want && !strcmp(want, "?") && lbl) { static NSMutableSet *seen; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
           pthread_mutex_lock(&mu); if (!seen) seen = [NSMutableSet new]; BOOL n = ![seen containsObject:lbl]; if (n) [seen addObject:lbl];
           pthread_mutex_unlock(&mu); if (n) nvlog("NVMTL_DUMP_PSO: pipeline label %s", lbl.UTF8String); }
@@ -3249,7 +3259,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     [self nvmtlBeginVisibility];
 }
 - (void)endEncoding {
-    _svFor=nil; _svKey=nil; _svSel=nil;   // nothing of this encoder outlives it
+    _svFor=nil; _svKey=nil; _svSel=nil;   // <wtl> nothing of this encoder outlives it
     _cb->_nEnd++;
     if (_dumpPso) { _dumpPso = NO; [self nvmtlDumpBoundFragmentBuffers]; }
     [self nvmtlCloseVisibility];

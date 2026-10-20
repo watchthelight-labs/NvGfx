@@ -1,5 +1,6 @@
 # vtables.py <binary>: print every __ZTV vtable as "vtable slot target", targets resolved through external relocations
 # (imported symbols) or the defined symbol at the stored address (local functions)
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 import subprocess, sys, re
 b = sys.argv[1]
 def run(*a): return subprocess.run(a, capture_output=True, text=True).stdout

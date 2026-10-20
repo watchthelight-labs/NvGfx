@@ -2,6 +2,7 @@
 // Each thread runs a long chain of fused multiply-adds on its float4 element of
 // a 64 MB buffer; command buffers are kept in flight back to back for N seconds.
 // Usage: nvgfx-burn [seconds] [--iters N]   (default 60 s, 4096 FMA steps per element)
+// <wtl> fork: nvgfx | author: watchthelight </wtl>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <stdio.h>

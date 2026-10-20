@@ -1,4 +1,5 @@
 # nvgfx-smi
+<!-- <wtl> fork: nvgfx | author: watchthelight </wtl> -->
 
 Read-only GPU telemetry for NvGfx on macOS: power limit, power draw, clocks,
 pstate, temperature and throttle reasons. It talks to the NVRM kext the same

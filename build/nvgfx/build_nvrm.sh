@@ -7,7 +7,7 @@
 # Environment:
 #   OGKM_SRC      NVIDIA open-gpu-kernel-modules checkout with tag 610.57.04   (default ~/src/deps/open-gpu-610.57.04)
 #   NVGFX_OUT     output root, NVRM goes to $NVGFX_OUT/nvrm                    (default ~/src/NvGfx-build)
-#   JOBS          make parallelism                                            (default 8; issue I-046, keep it moderate)
+#   JOBS          make parallelism                                            (default 8; keep it moderate)
 #   NVRM_PARITY   1 = reproduce the shipped 2.1.0 RM: skip 610-fsp-timer-double-destroy.patch, which 2.1.0 lacks
 #   NVGFX_REF_PKGROOT  unpacked 2.1.0 package root holding the shipped NVRM.kext, for the compare stage
 #
@@ -15,6 +15,7 @@
 # compile_cmds.sh} and the modeset equivalents, the layout rmcc.py, build-completion-archive.py and accel_build.sh
 # read as OGKM=$O/ogkm), $O/completion/libnvkms.a, $O/glue/*.o, $O/logs, $O/compare.txt.
 # Builds only. Nothing is loaded or installed.
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 set -euo pipefail
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 R=$(cd "$(dirname "$0")/../.." && pwd)

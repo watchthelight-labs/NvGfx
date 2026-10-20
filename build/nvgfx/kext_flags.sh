@@ -8,6 +8,7 @@
 # utils.mk (TARGET_ARCH x86_64 adds NV_X86_64 and NV_ARCH_BITS=64; TARGET_OS Darwin adds no OS define; release build,
 # so no DEBUG or DEVELOP). The first RM source (generated/g_access_cntr_buffer_nvoc.c) gets no per-file defines.
 # The kext sources use none of these directly; they reach only the NVIDIA headers the kexts include.
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 OGKM=${OGKM:-$HOME/src/deps/open-gpu-610.57.04}

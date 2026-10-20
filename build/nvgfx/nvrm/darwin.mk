@@ -4,6 +4,7 @@
 # for Mach-O. This overlay keeps NVIDIA's object rules and CFLAGS untouched and only adds a static archive target
 # (what NullMoth's NVRM.kext links: libnvkernel.a and libnvkms.a). The modeset shader blobs (GNU ld --format=binary)
 # are left out: kexts/NVRM/nvkms_shaders.cpp provides the _binary_*_shaders_xz_* symbols instead.
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 
 NVGFX_LIB  ?= libnvkernel.a
 NVGFX_OBJS  = $(filter-out $(SHADER_OBJS),$(OBJS))

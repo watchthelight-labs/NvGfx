@@ -179,6 +179,7 @@ NV_STATUS NV_API_CALL os_get_euid(NvU32 *pSecToken) { NV_XNU_TRC; if (!pSecToken
 NvU64 NV_API_CALL os_get_monotonic_time_ns(void)    { NV_XNU_TRC; uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns; }
 NvU64 NV_API_CALL os_get_monotonic_time_ns_hr(void) { NV_XNU_TRC; uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns; }
 NV_STATUS NV_API_CALL os_get_system_time(NvU32 *sec, NvU32 *usec) { NV_XNU_TRC; clock_sec_t s; clock_usec_t us; clock_get_calendar_microtime(&s, &us); *sec = (NvU32)s; *usec = (NvU32)us; return NV_OK; }
+// <wtl>
 // A battery means a notebook, and the firmware asks both questions to decide whether to run its mobile policy at all.
 // With nvrmgps or nvrmnvpcf set, ACPI answers (os-xnu2.cpp: NVPCF device or a _BIX/_BIF battery; this firmware's BAT0
 // reports _STA 0 under macOS); otherwise upstream's answer from the power source.
@@ -197,6 +198,7 @@ NvBool NV_API_CALL nv_acpi_is_battery_present(void)
     if (nv_xnu_platpower_enabled()) return nv_xnu_power_battery_present();
     bool ac, bat; nv_xnu_power_state(&ac, &bat); return bat ? NV_TRUE : NV_FALSE;
 }
+// </wtl>
 NvBool NV_API_CALL nv_platform_supports_s0ix(void)  { NV_XNU_TRC; return NV_FALSE; }
 NvBool NV_API_CALL os_is_nvswitch_present(void)     { NV_XNU_TRC; return NV_FALSE; }
 

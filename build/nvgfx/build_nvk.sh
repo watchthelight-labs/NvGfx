@@ -17,10 +17,11 @@
 # mako/yaml/packaging for meson, rustup stable with rustfmt, bindgen-cli and cbindgen in ~/.cargo/bin
 # (rustup component add rustfmt; cargo install bindgen-cli cbindgen). Meson downloads the Rust crate wraps
 # NAK needs on first setup.
-# Known differences from the shipped 2.1.0 dylib (2026-10-16): the published patch lacks five C exports 2.1.0 has
+# Known differences from the shipped 2.1.0 dylib: the published patch lacks five C exports 2.1.0 has
 # (nvmtl_nvk_dispatch_sass_v2/v3, nvmtl_nvk_sass_{image,sampler,combined}_handle_v1; the plugin then skips direct SASS
 # dispatch), and 2.1.0's internal CL kernels kept their shader asserts while its C code had none, which no single
 # meson b_ndebug setting produces; here both are NDEBUG. nvk/nvgfx/01-nv_push-opencl.patch is needed for mesa_clc.
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 set -euo pipefail
 R=$(cd "$(dirname "$0")/../.." && pwd)
 DEPS=${NVGFX_DEPS:-$HOME/src/deps}

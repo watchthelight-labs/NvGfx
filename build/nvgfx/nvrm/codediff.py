@@ -2,6 +2,7 @@
 # codediff.py <shipped> <ours> [N]: compare every function's code in two NVRM binaries with llvm-objdump, addresses
 # normalised: branch/call targets become <symbol+offset>, rip-relative operands become X(%rip) and their target is
 # kept only when it is a named symbol (string/data layout may shift). Prints how many functions are identical.
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 import re, subprocess, sys, collections, os
 OBJDUMP = os.environ.get("LLVM_OBJDUMP", "/opt/local/libexec/llvm-20/bin/llvm-objdump")
 hdr = re.compile(r"^[0-9a-f]+ <(.+)>:$")

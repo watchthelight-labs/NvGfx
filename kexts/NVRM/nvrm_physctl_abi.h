@@ -1,6 +1,7 @@
 /*
  * NvGfx: root-only RM control escape (notes/power.md). Shared by NVRM.cpp, nvrm_physctl.c and tools/nvgfx-smi.
  */
+// <wtl> fork: nvgfx | author: watchthelight </wtl>
 #pragma once
 #define NVRM_ESC_PHYS_CTRL       0xE4u
 #define NVRM_PHYSCTL_VERSION     1u

@@ -14,6 +14,7 @@
 // frees them when the connection closes).
 //
 // Usage: nvgfx-smi [--once] [--json] [--watch [ms]] [--verbose]
+// <wtl> fork: nvgfx | author: watchthelight </wtl>
 
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>

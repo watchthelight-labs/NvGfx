@@ -5,6 +5,7 @@
 # an older copy without the vram/flip-latch sysctls). Its "../" headers come from kexts/NVRMFB; nvrm_vram_abi.h lives
 # only in kexts/NVRM, so that directory is searched after kexts/NVRMFB. Flags: kext_flags.sh (same as NVAccel).
 # Environment: OGKM (open-gpu-kernel-modules 610.57.04), OUTROOT (default ~/src/NvGfx-build/kexts).
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 set -uo pipefail
 . "$(dirname "$0")/kext_flags.sh"
 SRC="$REPO/kexts/NVRMFB"; OUT="$OUTROOT/NVRMFB"

@@ -1,5 +1,6 @@
 #!/bin/sh
 # Build nvgfx-smi. Headers come straight from the NVIDIA open-gpu tree.
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 set -e
 cd "$(dirname "$0")"
 OG="${OPEN_GPU:-$HOME/src/deps/open-gpu-610.57.04}"

@@ -4,6 +4,7 @@
 # Same command line as build/accel_build.sh and build/nmxaccel_build.sh (NMX_ACCEL selects NMXAccel, NM_TAHOE the 26
 # build), with the RM -D set rebuilt in kext_flags.sh instead of NullMoth's private compile_cmds.sh.
 # Environment: OGKM (open-gpu-kernel-modules 610.57.04), OUTROOT (default ~/src/NvGfx-build/kexts).
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 set -uo pipefail
 . "$(dirname "$0")/kext_flags.sh"
 SRC="$REPO/kexts/NVRM"; WHAT=${1:-all}

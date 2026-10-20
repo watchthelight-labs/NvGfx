@@ -6,6 +6,7 @@
 #     NVGFX_PLUGIN (NVMTLDriver), NVGFX_XLATE (libnvmtl_translate.dylib), NVGFX_NVK (libvulkan_nouveau.dylib),
 #     NVGFX_NVRM, NVGFX_NVRMFB, NVGFX_NVACCEL15, NVGFX_NVACCEL26 (.kext bundles)
 # The result keeps install.sh/uninstall.sh unchanged; SHA256SUMS, BASELINE-IDENTITY.json and NVGFX-VERSION are rewritten.
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 set -euo pipefail
 LABEL=${1:?usage: package.sh <label, e.g. 2.1.0-nvgfx.1>}
 REF=${REF:-$HOME/Hackintosh/tooling/quarantine/nullmoth-release-2.3.7/x/pkgroot}

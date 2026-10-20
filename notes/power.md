@@ -1,4 +1,5 @@
 # GPU power limit on macOS
+<!-- <wtl> fork: nvgfx | author: watchthelight </wtl> -->
 
 ## What we see (2026-10-16, 15.8.1, RTX 5070 Laptop 10de:2d18)
 

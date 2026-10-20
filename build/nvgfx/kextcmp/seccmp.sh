@@ -1,5 +1,6 @@
 #!/bin/bash
 # seccmp.sh: REF=<shipped> NEW=<built> compare section sizes and contents (address column stripped)
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 for sec in "__TEXT __text" "__TEXT __cstring" "__TEXT __const" "__DATA __const" "__DATA __data" "__DATA __got"; do
   set -- $sec
   ra=$(otool -l "$REF" | grep -A4 "sectname $2" | grep -A3 "segname $1" | awk '/size/{print $2}' | head -1)

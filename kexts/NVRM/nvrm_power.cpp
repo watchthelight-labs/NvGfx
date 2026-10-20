@@ -2,7 +2,7 @@
  * NvGfx: give the GPU its platform power budget (notes/power.md).
  *
  * The RTX 5070 Laptop boots at its VBIOS default limit (50 W here). Windows lifts it to the laptop's 115 W through
- * NVIDIA's NVPCF driver; on Linux nvidia-powerd does. N-73 showed that GSP lifts the enforced limit to 115 W as soon as
+ * NVIDIA's NVPCF driver; on Linux nvidia-powerd does. GSP lifts the enforced limit to 115 W as soon as
  * it gets INTERNAL_PMGR_PFM_REQ_HNDLR_CONFIGURE_TGP_MODE with bEnable=1. With boot-arg nvrmtgp=1 this file does that
  * once the GPU is up, only on AC (_PSR), and follows plug and unplug with a 5 s poll.
  *
@@ -12,6 +12,7 @@
  *   debug.nvgfx_tgp_last_status  RO  NV_STATUS of the last control
  *   debug.nvgfx_tgp_applies      RO  controls sent
  */
+// <wtl> fork: nvgfx | author: watchthelight </wtl>
 
 #include "nv-xnu.h"
 #include <kern/thread_call.h>

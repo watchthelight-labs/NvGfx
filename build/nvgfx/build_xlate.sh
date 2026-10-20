@@ -2,6 +2,7 @@
 # NvGfx: build the shader translator dylib (libnvmtl_translate.dylib, Metal AIR -> SPIR-V; LGPL, metal2vulkan fork) from
 # this checkout, like NullMoth's build/build_xlate.sh. Exports are checked against the shipped 2.1.0 dylib instead of
 # the unpublished LIVE/xlate.exports list. Needs rustup stable (>= 1.87).
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 set -euo pipefail
 export PATH=$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin
 R=$(cd "$(dirname "$0")/../.." && pwd)

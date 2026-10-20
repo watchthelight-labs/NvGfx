@@ -3,6 +3,7 @@
  * userland cannot reach (notes/power.md). Called only by NVRM.cpp's NVRM_ESC_PHYS_CTRL, which checks root and the
  * nvrmphysctl boot-arg first. Compiled with RM's own osapi.c command line (rmcc.py) because it needs OBJGPU.
  */
+// <wtl> fork: nvgfx | author: watchthelight </wtl>
 
 #include <nv.h>
 #include <nv-priv.h>

@@ -1,4 +1,5 @@
 # NvGfx fork notes
+<!-- <wtl> fork: nvgfx | author: watchthelight </wtl> -->
 
 The `nvgfx` branch is NullMoth's 2.1.0 plus the changes in the README table. This file is the index of what the fork adds and how to switch it. The reasoning behind each change is in `notes/`.
 

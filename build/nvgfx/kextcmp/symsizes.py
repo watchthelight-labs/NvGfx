@@ -1,4 +1,5 @@
 # symsizes.py <binary>: print "section symbol size" for every defined symbol, size = distance to the next symbol
+# <wtl> fork: nvgfx | author: watchthelight </wtl>
 import subprocess, sys, re
 out = subprocess.run(["nm", "-nm", sys.argv[1]], capture_output=True, text=True).stdout
 rows = []
