@@ -33,6 +33,7 @@ All default off. With none set the kexts behave as upstream, apart from the Term
 | `nvrmgps=1` | NVRM | answer the GPS `_DSM` on the GPU node, so the RM's platform request handler finds GPS_2X |
 | `nvrmnvpcf=1` | NVRM | answer the NVPCF `_DSM` on `\_SB.NPCF`, as Linux does |
 | `nvrmphysctl=1` | NVRM | root-only control escape (0xE4) used by `nvgfx-smi --phys` and `--ctrl` |
+| `nvrmholdcap=<s>` | NVRM | ceiling for the boot hold while the bring-up is still running (40 to 600 s, default 120; upstream releases the hold at settle + 40 s regardless, which loses the desktop when the GSP bring-up is slow) |
 | `nvgfxwsfetch=1` | plugin | enable framebuffer fetch in WindowServer only (Dock blur investigation) |
 | `nvgfxfetchcopy=1` | plugin | emulate framebuffer fetch with copies in WindowServer when fetch is off |
 
