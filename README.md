@@ -11,6 +11,10 @@ Required Notice: Copyright (c) 2026 NullMoth Systems (https://nullmothsystems.co
 
 This is source-available, not open source: the driver is under the PolyForm Noncommercial License 1.0.0 (`LICENSE`), so you may use, change and share it for noncommercial purposes only. Third-party parts keep their own terms (`NOTICE`).
 
+## Intel Xe (branch `xe`)
+
+Work on Intel graphics happens on the [`xe` branch](https://github.com/watchthelight-labs/NvGfx/tree/xe): a kernel driver for Intel Xe GPUs ([XeGfx](https://github.com/watchthelight-labs/XeGfx), Linux i915 through FreeBSD's [drm-kmod](https://github.com/freebsd/drm-kmod)), Mesa's [ANV](https://gitlab.freedesktop.org/mesa/mesa) Vulkan driver, and this plugin on top. It is early: the driver builds and its first hardware test is queued. Start with [docs/XE.md](https://github.com/watchthelight-labs/NvGfx/blob/xe/docs/XE.md) on that branch, which also credits every project it builds on or learned from. Collaborators and testers with Intel Xe machines are welcome.
+
 ## What the fork changes
 
 | Change | Where | State |
