@@ -24,7 +24,7 @@
 
 static void wtlSysctlRegister(); static void wtlSysctlUnregister();
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
-extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.IGPUConsoleRange, "0.4", _start, _stop) }
+extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.IGPUConsoleRange, "0.5", _start, _stop) }
 extern "C" kern_return_t _start(kmod_info_t *, void *) { wtlSysctlRegister(); return KERN_SUCCESS; }
 extern "C" kern_return_t _stop(kmod_info_t *, void *) { wtlSysctlUnregister(); return KERN_SUCCESS; }
 
@@ -149,28 +149,71 @@ SYSCTL_PROC(_debug, OID_AUTO, wtlacpi_log, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG
 static void wtlSysctlRegister() { sysctl_register_oid(&sysctl__debug_wtlacpi); sysctl_register_oid(&sysctl__debug_wtlacpi_log); }
 static void wtlSysctlUnregister() { sysctl_unregister_oid(&sysctl__debug_wtlacpi); sysctl_unregister_oid(&sysctl__debug_wtlacpi_log); }
 
-// nvfbigpu=1: attach the dGPU (SSDT-DGPU-ON's DGON) from probe, before anything has used the iGPU slot. A driver that
-// starts on the iGPU and is terminated later marks it for a function reset on the next match, and that reset of the
-// scanning-out iGPU cuts the laptop's power (I-093), so the slot is decided once here and never handed back.
+static IOPCIDevice *rp01()
+{
+    IOPCIDevice *found = nullptr;
+    if (OSDictionary *m = IOService::serviceMatching("IOPCIDevice")) {
+        if (OSIterator *it = IOService::getMatchingServices(m)) {
+            while (OSObject *o = it->getNextObject()) {
+                IOPCIDevice *d = OSDynamicCast(IOPCIDevice, o);
+                OSString *ap = d ? OSDynamicCast(OSString, d->getProperty("acpi-path")) : nullptr;
+                if (ap && strnstr(ap->getCStringNoCopy(), "/PC00@0/RP01@60000", ap->getLength() + 1)) { found = d; d->retain(); break; }
+            }
+            it->release();
+        }
+        m->release();
+    }
+    return found;
+}
+
+// nvfbigpu=1: power the dGPU up from probe, before anything has used the iGPU slot. A driver that starts on the iGPU
+// and is terminated later marks it for a function reset on the next match, and that reset of the scanning-out iGPU cuts
+// the laptop's power (I-093), so the slot is decided once here and never handed back.
+// The sequence is the firmware's own (research/hybrid-graphics.md): the EC re-attach request, then RP01 Link Disable
+// cleared *before* PXP._ON (whose GC6O/L23D retrain cannot work with it set, which is what N-203 and N-207 did), then
+// a link check; without a link the GPU goes back off through PXP._OFF, never left powered without one.
 static bool attachFromProbe()
 {
     if (nvidiaPresent()) { RLOG("NVIDIA GPU already on PCI: no attach needed"); return true; }
     IOService *ec = IOService::waitForMatchingService(IOService::nameMatching("EC0"), 20ull * kSecondScale);
     RLOG("EC0 %s", ec ? "matched" : "not matched after 20 s");
     OSSafeReleaseNULL(ec);
-    IOACPIPlatformDevice *wd = OSDynamicCast(IOACPIPlatformDevice, IORegistryEntry::fromPath("IOACPIPlane:/_SB/WDGO"));
-    if (!wd) { RLOG("no WDGO ACPI device (SSDT-DGPU-ON not loaded): cannot attach the dGPU"); return false; }
-    UInt32 st = 0xFF, i1 = 0xFF, i2 = 0xFF, i3 = 0xFF;
-    RLOG("calling DGON");
-    IOReturn r = wd->evaluateInteger("DGON", &st);
-    wd->evaluateInteger("DGI1", &i1); wd->evaluateInteger("DGI2", &i2); wd->evaluateInteger("DGI3", &i3);
-    RLOG("DGON -> 0x%x result %u (1 present, 2 attached, 3 timed out); before: EC IGPS %u HPFF %u, PXP status %u",
-         (unsigned)r, (unsigned)st, (unsigned)i1, (unsigned)i2, (unsigned)i3);
-    wd->release();
+    IOACPIPlatformDevice *ecd = OSDynamicCast(IOACPIPlatformDevice, IORegistryEntry::fromPath("IOACPIPlane:/_SB/PC00/LPCB@1f0000/EC0"));
+    IOACPIPlatformDevice *gpu = OSDynamicCast(IOACPIPlatformDevice, IORegistryEntry::fromPath("IOACPIPlane:/_SB/PC00/RP01@60000/PXSX@0"));
+    IOPCIDevice *rp = rp01();
+    bool nv = false;
+    if (!ecd || !gpu || !rp) { RLOG("attach: missing EC0 %p, PXSX %p or RP01 %p", ecd, gpu, rp); goto out; }
+    {
+        OSObject *a[2] = { OSNumber::withNumber(4ull, 32), OSNumber::withNumber(0ull, 32) };
+        UInt32 hpff = 0xff;
+        ecd->evaluateObject("WEJF", nullptr, a, 2);
+        OSSafeReleaseNULL(a[0]); OSSafeReleaseNULL(a[1]);
+        OSObject *b[1] = { OSNumber::withNumber(2ull, 32) };
+        OSObject *res = nullptr;
+        if (ecd->evaluateObject("REJF", &res, b, 1) == kIOReturnSuccess)
+            if (OSNumber *n = OSDynamicCast(OSNumber, res)) hpff = n->unsigned32BitValue();
+        OSSafeReleaseNULL(res); OSSafeReleaseNULL(b[0]);
+        RLOG("attach: WEJF(4,0) done, HPFF %u", (unsigned)hpff);
+        if (hpff != 0) { RLOG("attach: HPFF still set, no power change"); goto out; }
+        uint16_t lc = rp->configRead16(0x50);
+        rp->configWrite16(0x50, (uint16_t)(lc & ~0x10));
+        RLOG("attach: RP01 link disable cleared (linkctl 0x%04x -> 0x%04x)", lc, rp->configRead16(0x50));
+        IOReturn r = gpu->evaluateObject("\\_SB.PC00.RP01.PXP._ON");
+        bool link = false;
+        for (int i = 0; i < 20 && !(link = (rp->configRead16(0x52) & 0x2000) != 0); i++) IOSleep(100);
+        RLOG("attach: PXP._ON -> 0x%x, data link %s (linkstat 0x%04x)", (unsigned)r, link ? "up" : "DOWN", rp->configRead16(0x52));
+        if (!link) {
+            r = gpu->evaluateObject("\\_SB.PC00.RP01.PXP._OFF");
+            RLOG("attach: no link, PXP._OFF -> 0x%x", (unsigned)r);
+            goto out;
+        }
+    }
     rescanRp01();
     for (int i = 0; i < 50 && !nvidiaPresent(); i++) IOSleep(200);
-    bool nv = nvidiaPresent();
+    nv = nvidiaPresent();
     RLOG("NVIDIA GPU %s after the attach", nv ? "present" : "absent");
+out:
+    OSSafeReleaseNULL(ecd); OSSafeReleaseNULL(gpu); OSSafeReleaseNULL(rp);
     return nv;
 }
 
