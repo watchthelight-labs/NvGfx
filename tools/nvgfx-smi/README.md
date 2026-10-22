@@ -94,4 +94,4 @@ time,pstate,gpc_mhz,mem_mhz,power_mw_inst,power_mw_avg,limit_req_mw,limit_enf_mw
 nvgfx-burn reached about 12.0 to 12.3 TFLOP/s FP32 during that run. Under load the
 average draw sits right on the 50 W limit, the graphics clock moves between about
 1600 and 1900 MHz, and the only throttle reason is `sw_power_cap`. The temperature
-stays under 70 C, so the GPU is held back by the power limit, not by heat.
+stays under 70 C, so it's the power limit holding the GPU back.

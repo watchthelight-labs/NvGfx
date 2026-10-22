@@ -34,7 +34,7 @@ The notes in `notes/` are the working record for each of these. `NVGFX.md` lists
 - It is tested on one GPU, one panel and one laptop. Nothing here is a general release.
 - It does not ship packages. You need NullMoth's 2.4.3 package (for the installer, the Mac app and the GSP firmware) and swap in the builds from this tree with `build/nvgfx/package.sh`.
 - No sleep and wake (the laptop runs with sleep disabled).
-- Upstream's `AGENTS.md` and `CONTRIBUTING.md` are NullMoth's rules for their repository and are kept as they wrote them. For this fork, the note at the top applies: I read and test every change, and I can explain mine.
+- Upstream's `AGENTS.md` and `CONTRIBUTING.md` are NullMoth's rules for their repository and are kept as they wrote them. In this fork I read and test every change, and I can explain mine.
 
 ## Building
 
