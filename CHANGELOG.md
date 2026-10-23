@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.5.3-nvgfx.2 (fork, not yet booted)
+
+- Plugin: shader cache files are written, and their last-use time touched, on one background queue instead of on the
+  thread that asked for the shader. WindowServer translated shaders and paid an fsync for each stored file on its
+  coreanimation.pipelines thread, which fits window drags at 11 to 28 flips/s for the first minutes after login
+  (upstream #370). Reads and the in-memory memo are unchanged, so a process still never reads or translates the same
+  shader twice. `NVMTL_CACHE_SYNC_IO=1` (environment, or a line in `nvrm610.conf`) puts the writes back on the caller
+  for an A/B.
+- Plugin: the log now names the shader cache folder in use and, after 500 function-constant lookups (then every 2000),
+  how many were served from memory, from disk, or translated.
+
 ## 2.5.3-nvgfx.1 (fork, booted 2026-10-22)
 
 - Rebased onto NullMoth 2.5.3, which moves NVRM to NVIDIA's 615.78.08 driver and GSP firmware. Upstream now carries
