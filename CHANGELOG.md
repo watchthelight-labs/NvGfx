@@ -7,7 +7,8 @@
   coreanimation.pipelines thread, which fits window drags at 11 to 28 flips/s for the first minutes after login
   (upstream #370). Reads and the in-memory memo are unchanged, so a process still never reads or translates the same
   shader twice. `NVMTL_CACHE_SYNC_IO=1` (environment, or a line in `nvrm610.conf`) puts the writes back on the caller
-  for an A/B.
+  for an A/B. Each cache file's last-use time is touched once per process, and a process waits up to 2 s at exit for
+  its queued writes.
 - Plugin: the log now names the shader cache folder in use and, after 500 function-constant lookups (then every 2000),
   how many were served from memory, from disk, or translated.
 
