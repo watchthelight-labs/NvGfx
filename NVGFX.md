@@ -6,7 +6,12 @@ The `nvgfx` branch is NullMoth's 2.1.0 plus the changes in the README table. Thi
 ## Branches and versions
 
 - `main`: upstream as pulled (tags `v2.1.0` .. `v2.4.3`).
-- `nvgfx-2.4.3` (current): the fork's changes on top of the upstream 2.4.3 tag, packages labelled `2.4.3-nvgfx.N`
+- `nvgfx-2.6.2` (current, not booted yet): the fork's changes on top of the upstream 2.6.2 tag, packages labelled
+  `2.6.2-nvgfx.N` (REF = NullMoth's 2.6.2 pkgroot). It carries everything from `nvgfx-2.5.3` and `cache-write-async`,
+  adds the HiDPI flag on scaled modes (#354), puts back app samplers that a shader's own sampler displaced (#363), and
+  takes GeekAudio's translator PR #385 (MPS depthwise convolution). `nvgfx-2.5.3` (2.5.3-nvgfx.1, booted 2026-10-22)
+  stays the default branch until 2.6.2-nvgfx.1 has booted.
+- `nvgfx-2.4.3`: the fork's changes on top of the upstream 2.4.3 tag, packages labelled `2.4.3-nvgfx.N`
   (`package.sh` writes the label into `NVGFX-VERSION`, REF = NullMoth's 2.4.3 pkgroot). 2.4.3 brought upstream's own
   fix for the thread_call pile-up (#295, every NVRMFB callback runs one at a time) and the merged PR 294 (AIR digest
   kept on the text), so the fork's digest half is upstream's now and only the per-module memo stays ours. The branch
@@ -55,6 +60,10 @@ Read from `/Library/GPUBundles/nvmtl/nvrm610.conf` in release builds, since the 
 
 | Switch | Effect |
 |---|---|
+| `NVMTL_NO_SAMPLER_RESTORE=1` | a shader's own sampler stays in the app's sampler slot after the draw (before 2.6.2-nvgfx.1) |
+| `NVMTL_NO_PSO_SKIP=1` | a repeated setRenderPipelineState inside a pass is applied again |
+| `NVMTL_NO_SV_MEMO=1` | the render encoder looks its sampler variant up on every draw |
+| `NVMTL_CACHE_SYNC_IO=1` | shader cache writes go back on the calling thread (before 2.5.3-nvgfx.2) |
 | `NVMTL_NVGFX_LEGACY_FBFETCH=1` | every render pass is a fetch pass again (2.1.0 behaviour, brings the Terminal overdraw back) |
 | `NVMTL_NVGFX_LEGACY_SEMU=1` | 2.1.0's broad stencil-export detector |
 | `NVMTL_NVGFX_FETCH_COPY=1` | framebuffer fetch emulated by copies for every process |
