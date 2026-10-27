@@ -3,7 +3,7 @@
 
 NvGfx is my fork of [NullMoth's NVIDIA Metal driver for macOS](https://github.com/nullmoth/nvidia-macos-driver), kept for one machine: a Lenovo Legion 5 15IAX10 with an RTX 5070 Laptop GPU (`10DE:2D18`) driving its 2560x1600 165 Hz panel, running macOS Tahoe 26.7.1 through OpenCore. All of the driver is NullMoth's work. The `nvgfx-2.5.3` branch (the default) carries my changes on top of their 2.5.3, listed below; `nvgfx` is the older line on 2.1.0, kept as the rollback and for its trace tooling. The upstream README is kept as [README.upstream.md](README.upstream.md), and `main` mirrors upstream unchanged.
 
-The branches `nvgfx-2.6.2` and `xe-2.6.2` carry the same changes rebased on NullMoth 2.6.2. They are built, not booted, so this branch stays the default and the one that runs here.
+The branches `nvgfx-2.6.2` and `xe-2.6.2` carry the same changes rebased on NullMoth 2.6.2. `nvgfx-2.6.2` booted as 2.6.2-nvgfx.1 on 2026-10-27 and is the default branch now; this branch is the previous line.
 
 Required Notice: Copyright (c) 2026 NullMoth Systems (https://nullmothsystems.com)
 
