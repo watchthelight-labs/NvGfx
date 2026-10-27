@@ -17,6 +17,6 @@ cp "$O/target/release/libnvmtl_translate.dylib" "$D"; strip -S "$D"
 install_name_tool -id @rpath/libnvmtl_translate.dylib "$D" 2>/dev/null; codesign -f -s - "$D" 2>/dev/null
 SHIP=$(find "$REF" -name libnvmtl_translate.dylib | head -1)
 gone=$(comm -23 <(nm -gU "$SHIP" | awk '{print $3}' | sort) <(nm -gU "$D" | awk '{print $3}' | sort) | wc -l | tr -d ' ')
-for p in NVMTL_NO_BINDLESS_ALL NVMTL_NO_TIER2; do strings -a "$D" | grep -q -- "$p" || echo "MISSING marker $p"; done
+for p in NVMTL_NO_BINDLESS_ALL NVMTL_NO_TIER2; do strings -a "$D" | grep -c -- "$p" >/dev/null || echo "MISSING marker $p"; done   # -c reads to the end: -q under pipefail SIGPIPEs strings
 echo "libnvmtl_translate $(git -C "$R" rev-parse --short HEAD) sha $(shasum -a256 "$D" | cut -c1-12) exports-missing-vs-2.1.0 $gone"
 echo "$D"
