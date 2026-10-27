@@ -5,7 +5,7 @@
 > how they work, and I'm happy to explain any of it. If something looks wrong or you have a
 > question, open an issue or ping me on Discord (`watchthelight`).
 
-NvGfx is my fork of [NullMoth's NVIDIA Metal driver for macOS](https://github.com/nullmoth/nvidia-macos-driver), kept for one machine: a Lenovo Legion 5 15IAX10 with an RTX 5070 Laptop GPU (`10DE:2D18`) driving its 2560x1600 165 Hz panel, running macOS Tahoe 26.7.1 through OpenCore. All of the driver is NullMoth's work. The `nvgfx-2.5.3` branch (the default) carries my changes on top of their 2.5.3, listed below; `nvgfx` is the older line on 2.1.0, kept as the rollback and for its trace tooling. The upstream README is kept as [README.upstream.md](README.upstream.md), and `main` mirrors upstream unchanged.
+NvGfx is my fork of [NullMoth's NVIDIA Metal driver for macOS](https://github.com/nullmoth/nvidia-macos-driver), kept for one machine: a Lenovo Legion 5 15IAX10 with an RTX 5070 Laptop GPU (`10DE:2D18`) driving its 2560x1600 165 Hz panel, running macOS Tahoe 26.7.1 through OpenCore. All of the driver is NullMoth's work. The `nvgfx-2.6.2` branch carries my changes on top of their 2.6.2, listed below (not booted yet, so `nvgfx-2.5.3` stays the default until it is); `nvgfx` is the older line on 2.1.0, kept as the rollback and for its trace tooling. The upstream README is kept as [README.upstream.md](README.upstream.md), and `main` mirrors upstream unchanged.
 
 Required Notice: Copyright (c) 2026 NullMoth Systems (https://nullmothsystems.com)
 
@@ -35,7 +35,7 @@ The notes in `notes/` are the working record for each of these. `NVGFX.md` lists
 ## What it can't do
 
 - It is tested on one GPU, one panel and one laptop. Nothing here is a general release.
-- It does not ship packages. You need NullMoth's 2.5.3 package (for the installer, the Mac app and the GSP firmware) and swap in the builds from this tree with `build/nvgfx/package.sh`.
+- It does not ship packages. You need NullMoth's 2.6.2 package (for the installer, the Mac app and the GSP firmware) and swap in the builds from this tree with `build/nvgfx/package.sh`.
 - No sleep and wake (the laptop runs with sleep disabled).
 - Upstream's `AGENTS.md` and `CONTRIBUTING.md` are NullMoth's rules for their repository and are kept as they wrote them. For this fork, the note at the top applies: I read and test every change, and I can explain mine.
 
@@ -50,8 +50,8 @@ build/nvgfx/build_nvk.sh          # libvulkan_nouveau (NVK with NullMoth's patch
 build/nvgfx/build_nvrmfb.sh       # NVRMFB.kext
 build/nvgfx/build_nvaccel.sh all  # NVAccel.kext for macOS 15 and 26
 build/nvgfx/build_nvrm.sh         # NVRM.kext (see build/nvgfx/NVRM-HARNESS.md)
-SHIPPED=<2.5.3 pkgroot> build/nvgfx/kextcmp/compare.sh   # symbols, sections, vtables against the shipped kexts
-build/nvgfx/package.sh 2.5.3-nvgfx.N                      # installer package with the builds swapped in
+SHIPPED=<2.6.2 pkgroot> build/nvgfx/kextcmp/compare.sh   # symbols, sections, vtables against the shipped kexts
+build/nvgfx/package.sh 2.6.2-nvgfx.N                      # installer package with the builds swapped in
 ```
 
 The kext builds are deterministic (same bytes on rebuild) with Apple clang 17.0.0 and 21.0.0 against the 15.5 SDK (`SDKROOT`).
@@ -65,4 +65,6 @@ Install the package `package.sh` produces with NullMoth's own `install.sh`; it b
 NullMoth Systems wrote the driver. Third-party parts, per `NOTICE`: NVIDIA's open GPU kernel modules (MIT / GPL-2.0), Mesa NVK (MIT), metal2vulkan by Anees Iqbal (LGPL-3.0 or later, the base of `translator/`), NVIDIA GSP firmware under NVIDIA's firmware licence. The fork, like upstream, is under the PolyForm Noncommercial License 1.0.0.
 
 Projects we learned from:
+- GeekAudio wrote the translator change in [nullmoth PR #385](https://github.com/nullmoth/nvidia-macos-driver/pull/385) (immutable local pointer fields), taken here with their commits as they are; it makes MPSGraph's depthwise convolution translate.
+- ccyykk666 found why the Dock blur turns into blocks ([nullmoth #363](https://github.com/nullmoth/nvidia-macos-driver/issues/363)): a shader's own sampler overwrote the app's sampler slot. The fix here follows their description.
 - [thanhnndev/nvidia-macos-driver](https://github.com/thanhnndev/nvidia-macos-driver): an AppleGraphicsDeviceControl service for a non-NVIDIA panel (NMXAGDC), the 0x2001 client-set reply CoreDisplay waits for before it sends display-pipe transactions, and why WindowServer must keep the accelerator that owns the main display.
