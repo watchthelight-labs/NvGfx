@@ -5,7 +5,7 @@
 > how they work, and I'm happy to explain any of it. If something looks wrong or you have a
 > question, open an issue or ping me on Discord (`watchthelight`).
 
-NvGfx is my fork of [NullMoth's NVIDIA Metal driver for macOS](https://github.com/nullmoth/nvidia-macos-driver), kept for one machine: a Lenovo Legion 5 15IAX10 with an RTX 5070 Laptop GPU (`10DE:2D18`) driving its 2560x1600 165 Hz panel, running macOS Tahoe 26.7.1 through OpenCore. All of the driver is NullMoth's work. The `nvgfx-2.6.2` branch carries my changes on top of their 2.6.2, listed below (not booted yet, so `nvgfx-2.5.3` stays the default until it is); `nvgfx` is the older line on 2.1.0, kept as the rollback and for its trace tooling. The upstream README is kept as [README.upstream.md](README.upstream.md), and `main` mirrors upstream unchanged.
+NvGfx is my fork of [NullMoth's NVIDIA Metal driver for macOS](https://github.com/nullmoth/nvidia-macos-driver), kept for one machine: a Lenovo Legion 5 15IAX10 with an RTX 5070 Laptop GPU (`10DE:2D18`) driving its 2560x1600 165 Hz panel, running macOS Tahoe 26.7.1 through OpenCore. All of the driver is NullMoth's work. The `nvgfx-2.6.2` branch carries my changes on top of their 2.6.2, listed below (booted as 2.6.2-nvgfx.1 on 2026-10-27; `nvgfx-2.5.3` is the previous line); `nvgfx` is the older line on 2.1.0, kept as the rollback and for its trace tooling. The upstream README is kept as [README.upstream.md](README.upstream.md), and `main` mirrors upstream unchanged.
 
 Required Notice: Copyright (c) 2026 NullMoth Systems (https://nullmothsystems.com)
 
