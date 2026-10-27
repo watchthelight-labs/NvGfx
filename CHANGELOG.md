@@ -1,6 +1,11 @@
 # Changelog
 
-## 2.6.2-nvgfx.1 (fork, not yet booted)
+## 2.6.2-nvgfx.1 (fork, booted 2026-10-27)
+
+Booted on the Legion 5 15IAX10 (RTX 5070 Laptop, macOS 26.7.1 25G241, BIOS Discrete) on 2026-10-27 (N-294): Metal 3,
+1680x1050 HiDPI at 165 Hz. System Settings lists the scaled sizes, the Dock blur has no blocks, the MPSGraph depthwise
+test gives the right values through the installed plugin, and window drag plus typing in an OpenGL terminal showed no
+text jumping back. The plugin on that boot was the `xe-2.6.2` build, which contains every plugin change below.
 
 - Rebased onto NullMoth 2.6.2, still on NVIDIA 615.78.08. The fork's commits from 2.5.3-nvgfx.1 and 2.5.3-nvgfx.2
   (async cache writes) and the Intel panel proxy head (`nvfbigpu=1`, off by default) carried over with no code
