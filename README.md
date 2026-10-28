@@ -1,6 +1,6 @@
 # NvGfx
 
-NvGfx is my fork of [NullMoth's NVIDIA Metal driver for macOS](https://github.com/nullmoth/nvidia-macos-driver), kept for one machine: a Lenovo Legion 5 15IAX10 with an RTX 5070 Laptop GPU (`10DE:2D18`) driving its 2560x1600 165 Hz panel, running macOS Tahoe 26.7.1 through OpenCore. All of the driver is NullMoth's work; the `nvgfx` branch carries my changes on top of their 2.1.0, listed below. The upstream README is kept as [README.upstream.md](README.upstream.md), and `main` mirrors upstream unchanged.
+NvGfx is my fork of [NullMoth's NVIDIA Metal driver for macOS](https://github.com/nullmoth/nvidia-macos-driver), kept for one machine: a Lenovo Legion 5 15IAX10 with an RTX 5070 Laptop GPU (`10DE:2D18`) driving its 2560x1600 165 Hz panel, running macOS Tahoe 26.7.2 (25G332, since 2026-10-28; 26.7.1 before, the 2.6.2 build carried over unchanged with Metal 3 at 165 Hz) through OpenCore. All of the driver is NullMoth's work; the `nvgfx` branch carries my changes on top of their 2.1.0, listed below. The upstream README is kept as [README.upstream.md](README.upstream.md), and `main` mirrors upstream unchanged.
 
 Required Notice: Copyright (c) 2026 NullMoth Systems (https://nullmothsystems.com)
 
