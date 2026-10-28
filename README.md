@@ -1,10 +1,6 @@
 # NvGfx
 <!-- <wtl> fork: nvgfx | author: watchthelight </wtl> -->
 
-> **Heads up:** a good portion of the changes in this fork are AI generated. I do understand
-> how they work, and I'm happy to explain any of it. If something looks wrong or you have a
-> question, open an issue or ping me on Discord (`watchthelight`).
-
 NvGfx is my fork of [NullMoth's NVIDIA Metal driver for macOS](https://github.com/nullmoth/nvidia-macos-driver), kept for one machine: a Lenovo Legion 5 15IAX10 with an RTX 5070 Laptop GPU (`10DE:2D18`) driving its 2560x1600 165 Hz panel, running macOS Tahoe 26.7.1 through OpenCore. All of the driver is NullMoth's work. The `nvgfx-2.5.3` branch (the default) carries my changes on top of their 2.5.3, listed below; `nvgfx` is the older line on 2.1.0, kept as the rollback and for its trace tooling. The upstream README is kept as [README.upstream.md](README.upstream.md), and `main` mirrors upstream unchanged.
 
 Required Notice: Copyright (c) 2026 NullMoth Systems (https://nullmothsystems.com)
@@ -37,7 +33,7 @@ The notes in `notes/` are the working record for each of these. `NVGFX.md` lists
 - It is tested on one GPU, one panel and one laptop. Nothing here is a general release.
 - It does not ship packages. You need NullMoth's 2.5.3 package (for the installer, the Mac app and the GSP firmware) and swap in the builds from this tree with `build/nvgfx/package.sh`.
 - No sleep and wake (the laptop runs with sleep disabled).
-- Upstream's `AGENTS.md` and `CONTRIBUTING.md` are NullMoth's rules for their repository and are kept as they wrote them. For this fork, the note at the top applies: I read and test every change, and I can explain mine.
+- Upstream's `AGENTS.md` and `CONTRIBUTING.md` are NullMoth's rules for their repository and are kept as they wrote them.
 
 ## Building
 
