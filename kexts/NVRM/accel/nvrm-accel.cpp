@@ -11,6 +11,7 @@
 #endif
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
+#include <kern/clock.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #ifdef NMX_XEGFX
 #include <IOKit/graphics/IOFramebuffer.h>   // the boot framebuffer's aperture and mode
@@ -119,7 +120,7 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_igpu, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
 #if defined(NMX_ACCEL) && defined(NMX_XEGFX)
 // the same accelerator over XeGfx (Intel Xe, branch xe): its own bundle id, matched only after XeGfx claims the GPU
-extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.1", _start, _stop) }
+extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.2", _start, _stop) }
 #elif defined(NMX_ACCEL)
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMXAccel, "0.1", _start, _stop) }
 #else
@@ -1323,6 +1324,63 @@ static bool nvAccelSurfCopyReady(IOSurface *s, unsigned head);
 static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
 static bool nvSurfWaitReady(unsigned int id);
 static void nvAccelIopHome(IOService *fb, unsigned head);
+#ifdef NMX_XEGFX
+// <wtl>
+// The Intel panel scans out the very buffer a frame is copied into. A word-at-a-time copy took longer than the scan and
+// ran at any point of it, so the panel showed the top of one frame over the bottom of the last: full-row bands while
+// scrolling. The copy now starts in the pipe's vblank and runs as one bulk copy that stays ahead of the scan.
+static int gIopVblSync = 1;
+static int gIopCopyUs, gIopCopyUsMax, gIopVblWaitUs, gIopVblPipe = -1;
+static SInt64 gCntIopVblHit, gCntIopVblMiss;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_vblsync, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopVblSync, 0,
+           "1 = copy an Intel panel frame at the start of its vblank, in one bulk copy; 0 = the old word copy at any time");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_copy_us, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCopyUs, 0, "last Intel panel frame copy, us");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_copy_us_max, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCopyUsMax, 0, "longest Intel panel frame copy, us (write 0 to reset)");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_vbl_wait_us, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopVblWaitUs, 0, "last wait for the Intel pipe's vblank, us");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_vbl_pipe, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopVblPipe, 0, "Intel pipe whose scanline the copy follows (-1 none found)");
+SYSCTL_QUAD(_debug, OID_AUTO, nvaccel_iop_vbl_hit, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gCntIopVblHit, "Intel panel frames copied from the start of a vblank");
+SYSCTL_QUAD(_debug, OID_AUTO, nvaccel_iop_vbl_miss, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gCntIopVblMiss, "Intel panel frames copied without a vblank (no pipe, or none within 25 ms)");
+static void nvXeVblSysctls(void)
+{
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_vblsync);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us_max); sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_wait_us);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_pipe);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_hit);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_miss);
+}
+static IOMemoryMap *gXeMmio;
+static uint64_t nvXeUs(uint64_t t0) { uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns); return ns / 1000; }
+// Waits (at most 25 ms) until the transcoder showing an h-line mode is in vblank. Read-only: TRANSCONF, TRANS_VTOTAL
+// and PIPEDSL of pipes A-D on display version 12 and later; XeGfx leaves the display to the firmware's mode.
+static bool nvXeWaitVblank(IOPCIDevice *pci, unsigned h)
+{
+    if (!pci) return false;
+    if (!gXeMmio) gXeMmio = pci->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0, kIOMapInhibitCache);
+    if (!gXeMmio || gXeMmio->getLength() < 0x80000) return false;
+    volatile uint32_t *r = (volatile uint32_t *)gXeMmio->getVirtualAddress();
+    int p = gIopVblPipe;
+    if (p < 0 || !(r[(0x70008 + p * 0x1000) / 4] & 0x80000000u) || (r[(0x6000C + p * 0x1000) / 4] & 0xffff) + 1 != h) {
+        p = -1;
+        for (int i = 0; i < 4 && p < 0; i++)
+            if ((r[(0x70008 + i * 0x1000) / 4] & 0x80000000u) && (r[(0x6000C + i * 0x1000) / 4] & 0xffff) + 1 == h) p = i;
+        if (p != gIopVblPipe) ALOG("iop: Intel panel %u lines: copies follow pipe %c's scanline", h, p < 0 ? '?' : 'A' + p);
+        gIopVblPipe = p;
+        if (p < 0) return false;
+    }
+    volatile uint32_t *dsl = &r[(0x70000 + p * 0x1000) / 4];
+    const uint64_t t0 = mach_absolute_time();
+    for (;;) {
+        const unsigned line = *dsl & 0xfffff;
+        if (line >= h) break;
+        const uint64_t us = nvXeUs(t0);
+        if (us > 25000) { gIopVblWaitUs = (int)us; return false; }
+        // the vblank is a few dozen lines: sleep only while it is far away
+        if (h - line > h / 3) IOSleep(1); else IODelay(5);
+    }
+    gIopVblWaitUs = (int)nvXeUs(t0);
+    return true;
+}
+// </wtl>
+#endif
 IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
 {
     NVPIPE_CNT(gCntPipePerform);
@@ -1396,6 +1454,17 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     const unsigned words = (((pitch < q.pitch) ? pitch : q.pitch) & ~3u) / 4;
     const unsigned spr = pitch / 4, dpr = q.pitch / 4;
     volatile unsigned int *d = (volatile unsigned int *)q.kva;
+#ifdef NMX_XEGFX
+    if (head == 4 && gIopVblSync) {
+        OSAddAtomic64(1, nvXeWaitVblank(a->fPCI, h) ? &gCntIopVblHit : &gCntIopVblMiss);
+        const uint64_t t0 = mach_absolute_time();
+        if (pitch == q.pitch) memcpy((void *)d, (const void *)src, (size_t)h * pitch);
+        else for (unsigned y = 0; y < h; y++)
+            memcpy((void *)(d + (unsigned long)y * dpr), (const void *)(src + (unsigned long)y * spr), (size_t)words * 4);
+        gIopCopyUs = (int)nvXeUs(t0);
+        if (gIopCopyUs > gIopCopyUsMax) gIopCopyUsMax = gIopCopyUs;
+    } else
+#endif
     for (unsigned y = 0; y < h; y++) {
         const volatile unsigned int *sp = src + (unsigned long)y * spr;
         volatile unsigned int *dp = d + (unsigned long)y * dpr;
@@ -1639,6 +1708,9 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_empty);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_src_res);    sysctl_register_oid(&sysctl__debug_nvaccel_iop_src_surf);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_blank);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_skip);
+#ifdef NMX_XEGFX
+    nvXeVblSysctls();
+#endif
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip);       sysctl_register_oid(&sysctl__debug_nvaccel_iop_flips);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_home);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_lock);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_novram); sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_stale);
