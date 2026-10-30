@@ -4898,6 +4898,15 @@ int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
         VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL };
     result = pvkBeginCommandBuffer(out->cb, &bi);
     if (result != VK_SUCCESS) { pvkDestroyCommandPool(g_dev, pool, NULL); memset(out, 0, sizeof *out); return nvmtl_cmd_refused(NVMTL_REFUSE_BEGIN, result); }
+    /* Metal orders command buffers on a queue; Vulkan submits do not, and ANV overlaps a blit or dispatch with the
+     * previous submit's writes (WindowServer bands, I-119). NVMTL_XE_CB_BARRIER=0 for the old way. */
+    static int cbb = -1;
+    if (cbb < 0) { const char *e = getenv("NVMTL_XE_CB_BARRIER"); cbb = nvmtl_vk_vendor() == 0x8086 && !(e && e[0] == '0'); }
+    if (cbb) {
+        VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT,
+                               VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
+        pvkCmdPipelineBarrier(out->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    }
     if (pvkGetCalibratedTimestampsEXT && g_timestamp_bits) {
         VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, 2, 0 };
         VkQueryPool timing = nvmtl_tspool_pop();
